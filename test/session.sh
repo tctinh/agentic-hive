@@ -19,10 +19,27 @@ printf 'tmux %s\n' "$*" >>"$HIVE_TEST_LOG"
 case $1 in
   load-buffer) cat >"$HIVE_ROOT/pending-prompt"; echo 0 >"$HIVE_ROOT/enters"; rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" ;;
   display-message)
+    if [[ ${HIVE_TEST_OMP_UI:-0} == 1 ]]; then
+      # omp parks the cursor on its composer input row; an accepted prompt
+      # leaves the box empty.
+      if [[ -f $HIVE_ROOT/queued-prompt ]]; then echo 1; else echo 2; fi
+      exit
+    fi
     if [[ -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then echo 2
     else echo 1; fi
     ;;
   capture-pane)
+    if [[ ${HIVE_TEST_OMP_UI:-0} == 1 ]]; then
+      # omp wraps inside a box whose last row doubles as the bottom border;
+      # the first box row is the leading visual line of the draft.
+      if [[ -f $HIVE_ROOT/queued-prompt ]]; then
+        printf 'previous output\n╭── omp ──╮\n│    ──╯\n'
+        exit
+      fi
+      prompt=$(cat "$HIVE_ROOT/pending-prompt" 2>/dev/null || true)
+      printf 'previous output\n╭── omp ──╮\n│  %s  │\n╰─ %s ─╯\n' "${prompt:0:20}" "${prompt:20}"
+      exit
+    fi
     if [[ -f $HIVE_ROOT/queued-prompt ]]; then printf '› Ask Codex to do anything\n› Ask Codex to do anything\n'; exit; fi
     if [[ -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then
       prompt=$(cat "$HIVE_ROOT/pending-prompt")
@@ -88,6 +105,14 @@ rg -q '^launch bob codex '"$HIVE_ROOT"'/projects/poke -- resume test-session con
 [[ ! -d $HIVE_ROOT/members/cedar ]]
 printf 'renamed member wakes its original conversation in the selected project folder\n'
 
+# omp resumes by session id too, using the same --resume flag as claude.
+printf '%s\n' '{"harness":"omp","dir":"'"$HIVE_ROOT/projects"'"}' >"$HIVE_ROOT/members/bob/state/launch.json"
+printf '%s\n' '{"session_id":"omp-session","harness":"omp"}' >"$HIVE_ROOT/telemetry/members/bob.json"
+: >"$HIVE_TEST_LOG"
+"$repo/bin/hive-member" send bob 'pick up where we left off' >/dev/null
+rg -q '^launch bob omp .* -- --resume omp-session pick up where we left off$' "$HIVE_TEST_LOG"
+printf 'omp member wakes its own conversation by session id\n'
+
 : >"$HIVE_TEST_LOG"
 printf '%s\n' '{"harness":"bash","dir":"/tmp"}' >"$HIVE_ROOT/members/bob/state/launch.json"
 printf '%s\n' '{"pid":99999,"harness":"bash","status":"idle"}' >"$HIVE_ROOT/telemetry/members/bob.json"
@@ -114,6 +139,15 @@ rm -f "$HIVE_ROOT/pending-prompt"
 HIVE_TEST_LIVE=1 HIVE_TEST_WRAP=1 "$repo/bin/hive-member" send bob 'DELIVERY_WRAP a message wrapped in a narrow terminal' >/dev/null
 [[ $(rg -c '^tmux load-buffer' "$HIVE_TEST_LOG") == 1 && $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
 printf 'narrow terminal prompt is submitted after paste\n'
+
+# omp frames its composer in a box and parks the cursor on the wrapped input
+# row, so the draft has to be read out of the frame rather than walked up to.
+: >"$HIVE_TEST_LOG"
+rm -f "$HIVE_ROOT/pending-prompt"
+HIVE_TEST_LIVE=1 HIVE_TEST_OMP_UI=1 "$repo/bin/hive-member" send bob 'DELIVERY_OMP a wrapped omp composer prompt' >/dev/null
+[[ $(rg -c '^tmux load-buffer' "$HIVE_TEST_LOG") == 1 && $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
+rg -q 'DELIVERY_OMP a wrapped omp composer prompt' "$HIVE_ROOT/accepted-prompts"
+printf 'omp boxed composer is detected and submitted\n'
 
 : >"$HIVE_TEST_LOG"
 HIVE_TEST_LIVE=1 HIVE_TEST_ACK_DELAY_N=9999 "$repo/bin/hive-member" send bob 'accepted now; hook arrives later' >"$tmp/out"
@@ -174,13 +208,44 @@ cat >"$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'codex %s\n' "$*" >>"$HIVE_TEST_LOG"
 EOF
-chmod +x "$tmp/bin/claude" "$tmp/bin/codex"
+cat >"$tmp/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+printf 'omp %s\n' "$*" >>"$HIVE_TEST_LOG"
+EOF
+chmod +x "$tmp/bin/claude" "$tmp/bin/codex" "$tmp/bin/omp"
 printf 'member instruction\n' >"$tmp/share/member-instruction.md"
 HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run claude 'first task' </dev/null >/dev/null
 HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run codex 'first task' </dev/null >/dev/null
 rg -q '^claude --permission-mode auto .*first task$' "$HIVE_TEST_LOG"
 rg -q '^codex --approve-for-me --add-dir '"$HIVE_ROOT"' .*first task$' "$HIVE_TEST_LOG"
 printf 'autonomous launch flags applied\n'
+
+# omp installs its extension into the agent dir and appends the member brief.
+cp "$repo/share/omp-hive.js" "$tmp/share/omp-hive.js"
+PI_CODING_AGENT_DIR="$tmp/agentdir" HIVE_SHARE="$tmp/share" \
+  "$repo/bin/hive-launch" --run omp 'first task' </dev/null >/dev/null
+rg -q '^omp --append-system-prompt .*first task$' "$HIVE_TEST_LOG"
+[[ -f $tmp/agentdir/extensions/hive.js ]]
+cmp -s "$repo/share/omp-hive.js" "$tmp/agentdir/extensions/hive.js"
+printf 'omp launch installs its extension and appends the member brief\n'
+
+# The exit notice must survive an unset HIVE_MEMBER: under `set -u` a bare
+# $HIVE_MEMBER aborted this line and swallowed the notice.
+out=$(env -u HIVE_MEMBER HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run claude </dev/null 2>&1) || true
+[[ $out == *'HIVE_MEMBER=unset'* ]]
+[[ $out != *'unbound variable'* ]]
+printf 'launch exit notice survives an unset HIVE_MEMBER\n'
+
+# The member pane runs the harness directly rather than a login shell, so
+# hive-launch must forward PI_CODING_AGENT_DIR into tmux itself. Without it
+# omp starts against the wrong agent directory and loses its config, skills
+# and credentials. Asserted on the real tmux invocation the fake tmux logs.
+: >"$HIVE_TEST_LOG"
+PI_CODING_AGENT_DIR=/srv/shared-omp-agent HIVE_LAUNCH_NO_ATTACH=1 \
+  "$repo/bin/hive-launch" bob omp "$HIVE_ROOT/projects" >/dev/null
+rg -q 'new-session .*PI_CODING_AGENT_DIR=/srv/shared-omp-agent' "$HIVE_TEST_LOG"
+rg -q 'new-session .*HIVE_MEMBER=bob' "$HIVE_TEST_LOG"
+printf 'launch forwards PI_CODING_AGENT_DIR to the member pane\n'
 
 mkdir -p "$HIVE_ROOT/members/bob/notes" "$HIVE_ROOT/claims/demo"
 printf 'keep work here\n' >"$HIVE_ROOT/members/bob/notes/work.md"

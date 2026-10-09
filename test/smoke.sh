@@ -103,6 +103,13 @@ check "telemetry written" test "$(jq -r .status "$HIVE_ROOT/telemetry/members/ca
 CODEX_HOME="$HIVE_ROOT/cx" HIVE_MEMBER=bob hive-hook codex Stop <<<'{"cwd":"/tmp"}' >/dev/null
 check "codex telemetry harness" test "$(jq -r .harness "$HIVE_ROOT/telemetry/members/bob.json")" = codex
 
+# omp uses the same adapter, driven by share/omp-hive.js.
+HIVE_MEMBER=carol hive-hook omp SessionStart <<<'{"cwd":"/tmp"}' >/dev/null
+check "omp telemetry harness" test "$(jq -r .harness "$HIVE_ROOT/telemetry/members/carol.json")" = omp
+out=$(HIVE_MEMBER=erin hive-hook omp SessionStart <<<'{"cwd":"/tmp"}')
+check "omp session start emits header" grep -q 'member: erin' <<<"$out"
+check "omp envelope matches claude shape" jq -e '.hookSpecificOutput.additionalContext | test("member: erin")' <<<"$out"
+
 # Hook is a no-op outside Hive.
 check "hook silent without member" test -z "$(HIVE_MEMBER= hive-hook claude PostToolUse <<<'{}')"
 

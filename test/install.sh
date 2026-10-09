@@ -45,7 +45,7 @@ done
 
 # --- 4. shared assets -----------------------------------------------------------
 asset_ok() { [[ -f $SHARE/$1 ]] && [[ $(stat -c '%a' "$SHARE/$1") == 644 ]]; }
-for a in member-instruction.md dashboard.html xterm.js xterm.css hive_members.py; do
+for a in member-instruction.md dashboard.html xterm.js xterm.css hive_members.py omp-hive.js; do
   check "share/agentic-hive/$a 0644" asset_ok "$a"
 done
 

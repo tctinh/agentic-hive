@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# hive-hook <harness> <event> — harness adapter for Agentic Hive (claude, codex).
+# hive-hook <harness> <event> — harness adapter for Agentic Hive.
 #
 # Installed as a lifecycle hook for SessionStart, UserPromptSubmit,
 # PostToolUse, Stop and SessionEnd. Reads the hook JSON on stdin. Claude Code
-# and Codex share the hookSpecificOutput.additionalContext output format.
+# and Codex share the hookSpecificOutput.additionalContext output format, and
+# so does the omp extension (share/omp-hive.js), which calls this same script.
 #
 # Contract (SPEC §12): silent unless something new happened; never fails or
 # blocks the harness; does nothing at all when HIVE_MEMBER is unset.

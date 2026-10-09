@@ -147,7 +147,7 @@ Hive Core does **not** decide what agents should work on.
 
 Each agent harness has a thin adapter.
 
-Adapters translate lifecycle events from Claude Code, Codex, OpenCode, etc. into Hive operations.
+Adapters translate lifecycle events from Claude Code, Codex, omp, etc. into Hive operations.
 
 Adapters should be silent when nothing relevant changed.
 
@@ -881,9 +881,13 @@ Semantic response happens only when useful.
 
 ### 12.5 Harness-specific adapters
 
-Implement adapters separately for Claude Code, Codex, and OpenCode.
+Implement adapters separately for Claude Code, Codex, and omp.
 
-Use their native lifecycle/tool hooks when available.
+Use their native lifecycle/tool hooks when available. Claude Code and Codex
+declare command hooks in their own settings files; omp instead loads extension
+modules from its agent directory, so its adapter is
+[share/omp-hive.js](share/omp-hive.js), installed there by `hive-launch`. Every
+adapter funnels into the same `hive-hook`, which owns the actual behavior.
 
 The common semantic contract is:
 
@@ -909,7 +913,7 @@ Implement one harness well, validate it, then add the next.
 
 The working system instruction should stay small. The canonical injected text
 is [share/member-instruction.md](share/member-instruction.md), shared by the
-Claude Code and Codex launch adapters. Keep the EXPLORE/COMMIT framing and
+Claude Code, Codex, and omp launch adapters. Keep the EXPLORE/COMMIT framing and
 examples there rather than maintaining competing prompt copies here. This
 framing guides generalists; it does not mechanize creativity or add coordination
 protocols. Do not inject the full implementation specification into every member.

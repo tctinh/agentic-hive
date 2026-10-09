@@ -42,7 +42,35 @@ in
         claude-code
         codex
       ];
-      description = "Agent harnesses available to members.";
+      # omp has no nixpkgs attribute; supply one through ompPackage below.
+      description = "Agent harnesses available to members (claude-code, codex, ...).";
+    };
+
+    ompPackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      example = lib.literalExpression ''pkgs.callPackage ./omp.nix { }'';
+      description = ''
+        An omp build made available to members. omp is published to npm as
+        @oh-my-pi/pi-coding-agent, not to nixpkgs, so there is no upstream
+        attribute to point at; supply your own derivation. It must provide
+        bin/omp that runs under bun (the package declares
+        engines.bun >= 1.3.14 and its bin maps to dist/cli.js), for example:
+
+          { lib, buildNpmPackage, bun }:
+          buildNpmPackage {
+            pname = "pi-coding-agent";
+            version = "17.3.5";
+            npmPackageName = "@oh-my-pi/pi-coding-agent";
+            npmPackageHash = "lib.fakeHash";
+            meta.mainProgram = "omp";
+            # ''$ escapes Nix interpolation: this is documentation, not code.
+            makeWrapperArgs = [ "--prefix PATH : ''${lib.makeBinPath [ bun ]}" ];
+          }
+        Members launch omp through their login PATH, so this is also added to
+        systemPackages. Leaving it null changes nothing and keeps `nix build`
+        working on hosts without an omp build.
+      '';
     };
 
     extraPackages = lib.mkOption {
@@ -145,7 +173,8 @@ in
       ];
       # Web controls launch member harnesses and a host shell through this
       # service. Their binaries must be in its PATH, not only the login profile.
-      path = [ cfg.package pkgs.bash pkgs.git pkgs.tmux ] ++ cfg.harnesses;
+      path = [ cfg.package pkgs.bash pkgs.git pkgs.tmux ]
+        ++ cfg.harnesses ++ lib.optional (cfg.ompPackage != null) cfg.ompPackage;
       environment = {
         HIVE_ROOT = cfg.root;
         HIVE_BIN_DIR = "/run/current-system/sw/bin";
@@ -256,6 +285,7 @@ in
     environment.systemPackages =
       [ cfg.package ]
       ++ cfg.harnesses
+      ++ lib.optional (cfg.ompPackage != null) cfg.ompPackage
       ++ (with pkgs; [
         tmux
         git

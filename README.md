@@ -2,9 +2,9 @@
 
 **A persistent Unix habitat for strong generalist agents working on shared projects.**
 
-Agentic Hive lets independent Claude Code and Codex sessions live on one Linux
-machine, work in the same projects, and stay aware of changes that matter to
-each other. It gives them persistent sessions, shared working memory, durable
+Agentic Hive lets independent Claude Code, Codex, and omp sessions live on one
+Linux machine, work in the same projects, and stay aware of changes that matter
+to each other. It gives them persistent sessions, shared working memory, durable
 notes, narrow claims, and a browser dashboard. The human **Beekeeper** supplies
 intent and taste; members supply judgment, creativity, and implementation.
 
@@ -58,7 +58,7 @@ design to implementation without acquiring a permanent job title.
 
 ```mermaid
 flowchart TD
-    human["Beekeeper: intent, taste, authority"] --> members["Independent members: Claude Code / Codex in tmux"]
+    human["Beekeeper: intent, taste, authority"] --> members["Independent members: Claude Code / Codex / omp in tmux"]
     members <--> habitat["Shared projects, Room, claims, member nests"]
     dashboard["Browser dashboard and terminals"] --> members
     dashboard --> habitat
@@ -105,9 +105,9 @@ or approval queue.
 ## A shared change in practice
 
 Imagine asking two members to make saved searches reliable. `nova` works on
-the API; `cedar` works on the client. Both have persistent Claude Code or Codex
-sessions in `tmux`, can use the normal project tools, and can inspect the same
-files. Each keeps its identity as its focus changes.
+the API; `cedar` works on the client. Both run persistent Claude Code, Codex,
+or omp sessions in `tmux`, can use the normal project tools, and can inspect
+the same files. Each keeps its identity as its focus changes.
 
 `nova` claims the API files it is editing. When the response shape changes, it
 posts that change in the **Room**. `cedar` hears the update at a safe prompt
@@ -167,7 +167,7 @@ and trigger optional desktop alerts while the dashboard is open. Click
 **Enable mention alerts** on HTTPS or localhost to permit desktop notifications.
 Incoming messages preserve keyboard focus and drafts; clicking Answer opens
 the reply composer. Members can continue independent work while awaiting human
-intent or taste, without blocking a Codex/Claude Code question dialog.
+intent or taste, without blocking a Codex/Claude Code/omp question dialog.
 
 ![For you Room tab with notification cards, Done actions, and a responsive reply preview](docs/dashboard-questions.png)
 
@@ -202,7 +202,7 @@ individual member:
 
 | Control | Action |
 | --- | --- |
-| **Terminal icon** | Attach the member's running Codex or Claude Code terminal inside the WebUI. |
+| **Terminal icon** | Attach the member's running Codex, Claude Code, or omp terminal inside the WebUI. |
 | **Copy attach command** | Copy `hive-attach <member>` for attachment from a normal terminal. |
 | **Restart** | Restart the member's harness and resume its conversation. |
 | **Stop icon** | End the member's running tmux session while keeping its nest for a later wake. |
@@ -316,6 +316,7 @@ Sign in to each harness once as the `hive` user:
 ```sh
 sudo -u hive -i claude
 sudo -u hive -i codex login
+sudo -u hive -i omp
 ```
 
 Start a member in an existing project directory:
@@ -323,7 +324,22 @@ Start a member in an existing project directory:
 ```sh
 hive-launch nova codex /srv/hive/projects/my-project
 hive-launch cedar claude /srv/hive/projects/my-project
+hive-launch wren omp /srv/hive/projects/my-project
 ```
+
+Claude Code and Codex integrate through command hooks declared in their own
+settings files, which `hive-launch` writes on each launch. omp has no such file:
+`hive-launch` installs [share/omp-hive.js](share/omp-hive.js) into omp's agent
+directory (`$PI_CODING_AGENT_DIR`, else `~/.omp/agent`) so ambient extension
+discovery loads it. The extension only translates events — it calls the same
+`hive-hook` the other harnesses use, so Room delivery and telemetry behave
+identically across all three.
+
+omp is published to npm, not to your distribution or nixpkgs:
+`bun add -g @oh-my-pi/pi-coding-agent` (it declares `engines.bun >= 1.3.14` and
+its `bin/omp` runs under bun). On NixOS, supply your own build through the
+module's `services.agentic-hive.ompPackage`, which is `null` by default so a
+host without one still builds.
 
 The dashboard defaults to `127.0.0.1:8080`. Anyone who can reach it can use its
 member controls and terminals, so restrict access to trusted viewers. Members
@@ -380,14 +396,15 @@ proposal. No permanent designer role is needed.
 ## Current scope
 
 Hive targets systemd Linux and supports both a portable installer and a NixOS
-module, and includes Claude Code and Codex launch and hook adapters. OpenCode
-and stronger sandbox levels remain planned. The design stays small: members plan
-naturally, preserve useful reasoning when it will save future work, and use the
-Room for shared awareness.
+module, and includes Claude Code, Codex, and omp launch and hook adapters.
+OpenCode and stronger sandbox levels remain planned. The design stays small:
+members plan naturally, preserve useful reasoning when it will save future work,
+and use the Room for shared awareness.
 
 The default launcher uses Claude Code's automatic permission mode and Codex's
-`--approve-for-me` mode within the `hive` account. Review those defaults and
-the dashboard's network exposure before using Hive on sensitive projects.
+`--approve-for-me` mode within the `hive` account. omp already defaults to
+`tools.approvalMode: yolo`, so no extra flag is passed. Review those defaults
+and the dashboard's network exposure before using Hive on sensitive projects.
 
 ## Repository map
 
@@ -396,7 +413,8 @@ the dashboard's network exposure before using Hive on sensitive projects.
 | [bin/hive](bin/hive) | Room, claims, observation, and knowledge CLI. |
 | [bin/hive-member](bin/hive-member) | Member lifecycle and prompt delivery. |
 | [bin/hive-launch](bin/hive-launch) | Persistent `tmux` sessions. |
-| [bin/hive-hook](bin/hive-hook) | Claude Code and Codex event adapters. |
+| [bin/hive-hook](bin/hive-hook) | Event adapter shared by every supported harness. |
+| [share/omp-hive.js](share/omp-hive.js) | omp extension binding omp events to `hive-hook`. |
 | [bin/hive-web](bin/hive-web) | Browser dashboard server. |
 | [nix/module.nix](nix/module.nix) | NixOS user, service, and package setup. |
 | [install/hive-install](install/hive-install) | Portable systemd installer for user, habitat, services and hooks. |

@@ -139,12 +139,40 @@ cmd_delete() {
   say "deleted $m (Room history retained)"
 }
 
+trim() { # strip leading/trailing whitespace, in place via name
+  local s=${!1}
+  s=${s#"${s%%[![:space:]]*}"}
+  printf -v "$1" '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
 composer() {
-  local row line rows=()
+  local row line draft rows=()
   row=$(tmux display-message -p -t "=hive-$1:0.0" '#{cursor_y}') || return 1
   [[ $row =~ ^[0-9]+$ ]] || return 1
   mapfile -t rows < <(tmux capture-pane -p -t "=hive-$1:0.0")
-  # Walk wrapped input up from the cursor, never search old transcript prompts.
+
+  # omp draws the composer as a │ … │ box whose last row doubles as the bottom
+  # border, so walking up from the cursor lands on a border, not on text. Take
+  # the first row below the ╭ border: it is exactly the leading visual line of
+  # the draft, which is what a wrapped paste still begins with. Joining every
+  # wrapped row would not, because the line break eats the separating space.
+  local i n t
+  n=${#rows[@]}
+  for ((i = n - 1; i >= 0; i--)); do
+    [[ ${rows[i]} == '╭──'* ]] || continue
+    ((i + 1 < n)) || break
+    case ${rows[i + 1]} in
+      '│'*'│') t=${rows[i + 1]#│}; t=${t%│} ;;
+      '╰─'*) t=${rows[i + 1]#╰─}; t=${t%╯}; t=${t%─} ;;
+      *) break ;;
+    esac
+    trim t
+    printf '%s' "$t"
+    return 0
+  done
+
+  # claude and codex: walk wrapped input up from the cursor, never search old
+  # transcript prompts.
   for ((; row >= 0; row--)); do
     line=${rows[row]:-}
     case $line in
@@ -251,7 +279,7 @@ cmd_wake() (
 
   if ((!fresh)) && [[ -n $sid ]]; then
     case $harness in
-      claude) args=(--resume "$sid") ;;
+      claude|omp) args=(--resume "$sid") ;;
       codex) args=(resume "$sid") ;;
     esac
     say "waking $m ($harness in $dir), resuming conversation $sid"

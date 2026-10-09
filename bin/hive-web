@@ -560,7 +560,8 @@ def cached_git_projects(paths):
 
 
 def quota():
-    """Account quota recorded by hive-statusline (claude) and hive-hook (codex)."""
+    """Account quota: hive-statusline (claude), hive-hook (codex), and the omp
+    extension, which writes one file per provider that reports usage limits."""
     out = []
     qdir = HIVE_ROOT / "telemetry/quota"
     for f in sorted(qdir.glob("*.json")) if qdir.is_dir() else []:
@@ -574,8 +575,9 @@ def quota():
             if isinstance(r, (int, float)):  # epoch seconds
                 r = datetime.fromtimestamp(r).astimezone().isoformat(timespec="seconds")
             windows.append({"name": w.get("name"), "used_percent": w.get("used_percent"), "resets_at": r})
-        out.append({"harness": q.get("harness", f.stem), "updated_at": q.get("updated_at"),
-                    "reported_by": q.get("reported_by"), "plan": q.get("plan"), "windows": windows})
+        out.append({"harness": q.get("harness", f.stem), "provider": q.get("provider"),
+                    "updated_at": q.get("updated_at"), "reported_by": q.get("reported_by"),
+                    "plan": q.get("plan"), "windows": windows})
     return out
 
 

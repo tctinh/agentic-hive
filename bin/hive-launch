@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # hive-launch — start or attach a persistent member session in tmux.
 #
-#   hive-launch <member> [claude|codex] [dir] [-- harness args...]
+#   hive-launch <member> [claude|codex|omp] [dir] [-- harness args...]
 #   hive-launch --list
 #
 # Members run as the `hive` account. When invoked by another user (the
 # Beekeeper), re-executes itself through sudo.
+#
+# claude and codex integrate through command hooks declared in their own
+# settings files. omp has no such file: it loads extensions from its agent
+# directory, so Hive ships share/omp-hive.js and installs it there instead.
 set -euo pipefail
 
 HIVE_ROOT="${HIVE_ROOT:-/srv/hive}"
@@ -41,6 +45,27 @@ install_codex_hooks() {
   [[ -f $f && $(cat "$f") == "$want" ]] || printf '%s\n' "$want" >"$f"
 }
 
+# omp has no command-hook settings file: it loads extension modules from its
+# agent directory. Install ours there so ambient discovery picks it up.
+# PI_CODING_AGENT_DIR overrides that directory; otherwise it is ~/.omp/agent.
+install_omp_extension() {
+  local src="$SHARE/omp-hive.js" dest
+  dest="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/extensions/hive.js"
+  if [[ ! -f $src ]]; then
+    echo "hive-launch: extension missing: $src; omp runs without Room awareness" >&2
+    return 0
+  fi
+  # Re-install in place on every launch so an upgraded Hive takes effect.
+  if [[ -f $dest ]] && cmp -s "$dest" "$src"; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || {
+    echo "hive-launch: cannot write $dest; omp runs without Room awareness" >&2
+    return 0
+  }
+  cp "$src" "$dest.tmp.$$" && chmod 0644 "$dest.tmp.$$" && mv -f "$dest.tmp.$$" "$dest"
+}
+
 # Inner mode: runs inside the tmux pane.
 if [[ ${1:-} == --run ]]; then
   shift
@@ -58,10 +83,17 @@ if [[ ${1:-} == --run ]]; then
       install_codex_hooks
       codex --approve-for-me --add-dir "$HIVE_ROOT" -c "developer_instructions=$(jq -Rs . <"$SHARE/member-instruction.md")" "$@" || true
       ;;
+    omp)
+      install_omp_extension
+      # approvalMode already defaults to yolo, so members run unattended.
+      omp --append-system-prompt "$(cat "$SHARE/member-instruction.md")" "$@" || true
+      ;;
     *) die "unknown harness: $harness" ;;
   esac
   echo
-  echo "[$harness exited — shell kept open; HIVE_MEMBER=$HIVE_MEMBER]"
+  # ${HIVE_MEMBER:-unset}: under `set -u` an unset HIVE_MEMBER would otherwise
+  # abort this line and lose the exit notice entirely.
+  echo "[$harness exited — shell kept open; HIVE_MEMBER=${HIVE_MEMBER:-unset}]"
   exec bash -l
 fi
 
@@ -71,7 +103,7 @@ if [[ ${1:-} == --list ]]; then
   exit 0
 fi
 
-member="${1:-}"; [[ -n $member ]] || die "usage: hive-launch <member> [claude|codex] [dir] [-- args...]"
+member="${1:-}"; [[ -n $member ]] || die "usage: hive-launch <member> [claude|codex|omp] [dir] [-- args...]"
 shift
 harness=claude
 dir="$HIVE_ROOT/projects"
@@ -91,12 +123,17 @@ if ! tmux has-session -t "=$session" 2>/dev/null; then
   # Launch record: lets hive-member wake the member in the same place.
   jq -n --arg h "$harness" --arg d "$dir" --arg now "$(date --iso-8601=seconds)" \
     '{harness: $h, dir: $d, launched_at: $now}' >"$HIVE_ROOT/members/$member/state/launch.json"
+  # The pane runs the harness directly, not a login shell, so anything the hive
+  # user's profile exports would be lost. omp reads its agent directory from
+  # PI_CODING_AGENT_DIR; a member pointed at the wrong one loses its config,
+  # skills and credentials.
   tmux new-session -d -s "$session" -c "$dir" \
     -e "HIVE_MEMBER=$member" \
     -e "HIVE_ROOT=$HIVE_ROOT" \
     -e "HIVE_USER=$HIVE_USER" \
     -e "HIVE_BIN_DIR=${HIVE_BIN_DIR:-}" \
     -e "HIVE_SHARE=$SHARE" \
+    -e "PI_CODING_AGENT_DIR=${PI_CODING_AGENT_DIR:-}" \
     -e "PATH=$PATH:$HIVE_ROOT/tools/bin" \
     -- "$0" --run "$harness" "$@"
   echo "hive-launch: started $session ($harness in $dir)"

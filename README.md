@@ -8,6 +8,12 @@ each other. It gives them persistent sessions, shared working memory, durable
 notes, narrow claims, and a browser dashboard. The human **Beekeeper** supplies
 intent and taste; members supply judgment, creativity, and implementation.
 
+Our primary use case is **game development**: long-running agent sessions
+exploring player experience, building interacting gameplay systems, maintaining
+saves, and reviewing native game captures. That work shaped Hive's emphasis on
+preserving creative judgment alongside reliable implementation. Feature dev logs
+bring the resulting articles, screenshots, GIFs, and videos into the same WebUI.
+
 ![Hive dashboard with members and recent Room conversation](docs/dashboard-demo.png)
 
 *Screenshots use a demo project. The session-control and harness-terminal
@@ -39,13 +45,27 @@ decide what those facts mean. The Beekeeper keeps final semantic authority.
 
 ## What to use it for
 
-Use Hive for projects where several agents need to work over time and their
-discoveries, interfaces, or design decisions affect one another. Examples:
+### Our use case: game development
+
+Game development mixes questions of taste with engineering work. “This game
+lacks run identity” needs exploration of the player experience. A selected
+combat rule needs implementation, save compatibility, and tests. An interaction
+between combat and town needs to be seen and played to judge whether it creates
+a meaningful decision. These questions often span several systems and many
+agent sessions.
+
+We use Hive to keep that work connected over time. Members share discoveries
+in one Room, avoid conflicting edits with narrow claims, and preserve useful
+reasoning through compaction. Current creator direction keeps yesterday's ideas
+from overriding today's intent. The Beekeeper can inspect the running harnesses,
+browse project artifacts, and review feature articles with gameplay captures.
+The agents remain generalists; the Beekeeper owns the game's direction and feel.
+
+The same habitat fits other projects where several agents' discoveries,
+interfaces, or design decisions affect one another:
 
 - **Application development:** API, client, and integration work sharing a
   repository or related worktrees.
-- **Games and interactive products:** explore player experience, select a
-  direction, then implement and validate the interacting systems.
 - **Migrations and refactors:** preserve selected invariants across sessions,
   coordinate shared interfaces, and collect integration evidence.
 - **Ongoing project work:** resume members in their project with relevant
@@ -77,6 +97,7 @@ surfaces under `/srv/hive`:
 | **Project grounding** | Keeps code, selected contracts, and current creator direction in the project. | Members can distinguish current behavior from the intended target. |
 | **Persistent sessions** | Keep a harness in `tmux`; lifecycle tools attach, wake, restart, or stop it. | Work can continue in the same project and conversation, or start with fresh context when useful. |
 | **Dashboard** | Shows member activity, claims, Git status, notes, Room messages, host resources, and terminals. | The Beekeeper can inspect and steer the habitat from one place. |
+| **Dev logs** | Reads member-written Markdown feature articles with bundled screenshots, GIFs, and videos. | The Beekeeper can review what changed in the player experience alongside evidence and remaining limits. |
 
 Members decide what to investigate, what to share, and how to implement a
 selected change. Hive has no planner agent, supervisor hierarchy, task graph,
@@ -102,30 +123,34 @@ they do not establish fun, balance, or usability. These are semantic distinction
 in the [member instructions](share/member-instruction.md), with no mode commands
 or approval queue.
 
-## A shared change in practice
+## A shared game change in practice
 
-Imagine asking two members to make saved searches reliable. `nova` works on
-the API; `cedar` works on the client. Both have persistent Claude Code or Codex
-sessions in `tmux`, can use the normal project tools, and can inspect the same
-files. Each keeps its identity as its focus changes.
+A request such as “make combat builds change Day decisions” starts with
+**EXPLORE**. Here, Day is the town phase between combats. Members inspect the
+current game, identify the missing player decision, and propose distinct ways
+to create it, with tradeoffs and failure cases. They stop at a proposal unless
+the Beekeeper asks for a prototype or
+implementation. A complete matrix of passives is not the goal.
 
-`nova` claims the API files it is editing. When the response shape changes, it
-posts that change in the **Room**. `cedar` hears the update at a safe prompt
-boundary and adjusts the client. The Room carries discoveries, handoffs, and
-requests that matter now. Routine steps stay in each member's working session.
+Once the Beekeeper selects a direction, members switch to **COMMIT**. For
+example, `nova` can implement the selected card interaction while `cedar` works
+on its Day presentation. Both use ordinary project tools in persistent Claude
+Code or Codex sessions. They claim shared seams, communicate interface changes
+in the one **Room**, handle save consequences, and test the selected behavior.
+These are temporary areas of attention; each member keeps its identity as its
+focus changes.
 
-If the work lasts through compaction, `nova` can keep short working notes
-in its own member nest. Exploration notes preserve hypotheses and uncertainty;
-implementation notes preserve selected intent and invariants. It chooses the
-file and format. A shared API invariant can live in one existing project
-document, with tests to check whether the implementation satisfies it. Notes
-preserve reasoning; the Room carries changes peers need now.
+If the work spans compaction, member-local notes preserve selected intent,
+invariants, and unresolved questions. Shared contracts reuse existing project
+documents. Routine implementation steps stay in the working session; the Room
+carries facts and handoffs that another member can act on.
 
-The Beekeeper can see member state, claims, project Git status, Room history,
-project documents and artifacts, notes, and terminals in the browser. The same
-habitat is available through
-ordinary files and commands under `/srv/hive`; the dashboard is a convenient
-window into it.
+For a meaningful completed feature, a member can write a **dev-log article**
+with native screenshots or a short gameplay clip, the relevant checks, and
+remaining limits. The Beekeeper reads it in Hive's WebUI and can ask follow-up
+questions in the Room. Tests establish that the selected rules work; captures
+show what was rendered; playtesting establishes whether the change feels right.
+The same project files, notes, and artifacts remain accessible through Unix.
 
 ## Feature tour
 
@@ -201,37 +226,46 @@ its direct link. Articles display Markdown, screenshots, animated GIFs, and
 MP4/WebM videos with playback and seeking. **View source** opens the bundle in
 the project explorer. Dashboard polling preserves an open article and its video.
 
+For game development, this is where the Beekeeper reviews a feature's intended
+player decision, the implemented interaction, and a native gameplay or UI
+capture. A useful article explains what changed for the player and what remains
+uncertain. Keep rule tests, simulations, visual captures, and human playtest
+feedback distinct. An exploration proposal stays labeled as a hypothesis.
+
 ![Dev-log article reader with a screenshot and feature explanation](docs/dashboard-devlogs.png)
 
-Members write ordinary files in shared artifacts:
+Members write ordinary files in shared artifacts. For example, a game feature
+could use this bundle:
 
 ```text
-/srv/hive/artifacts/devlogs/waypoint/saved-searches/
+/srv/hive/artifacts/devlogs/titantwoshot/blacksmith-route/
 ├── index.md
-├── screen.png
-└── interaction.mp4
+├── blacksmith-route.png
+└── rare-fire-route.mp4
 ```
 
 An article can start with a heading alone, or optional TOML metadata:
 
 ```markdown
 +++
-title = "Saved searches survive reload"
-summary = "The client keeps the server timestamp."
+title = "A combat card changes the Blacksmith decision"
+summary = "A Rare Fire card gives the player a reason to choose the Blacksmith route."
 author = "cedar"
 date = 2026-10-11T13:00:00Z
 commit = "abc1234"
-cover = "screen.png"
+cover = "blacksmith-route.png"
 +++
 
 ## What changed
-Reload keeps the saved search visible with its original timestamp.
+Owning this Rare Fire card makes the player consider investing in the
+Blacksmith route during Day.
 
-![Saved search after reload](screen.png)
-![The interaction](interaction.mp4)
+![The Day decision with the Rare Fire card](blacksmith-route.png)
+![The combat-to-Day interaction](rare-fire-route.mp4)
 
 ## Evidence and limits
-Describe the checks and captures, and what remains unverified.
+Record which rule/save checks ran and which native build was captured.
+Keep playtest feedback separate from automated evidence.
 ```
 
 Place media beside the article, then write `index.md` last or replace it

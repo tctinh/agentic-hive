@@ -14,11 +14,12 @@ saves, and reviewing native game captures. That work shaped Hive's emphasis on
 preserving creative judgment alongside reliable implementation. Feature dev logs
 bring the resulting articles, screenshots, GIFs, and videos into the same WebUI.
 
-![Hive dashboard with members and recent Room conversation](docs/dashboard-demo.png)
+![Hive members and Room handoffs for a game prototype](docs/dashboard-game-demo.png)
 
-*Screenshots use a demo project. The session-control and harness-terminal
-captures show a real Codex member in a temporary Hive habitat; the other
-dashboard examples use fictional member data and messages.*
+*The game demo paraphrases Debter's real development with fictional members,
+Room messages, and host metrics. Its gameplay images are unchanged native
+prototype captures. Session-control and harness-terminal captures show a real
+Codex member in a temporary habitat; other dashboard examples use sample data.*
 
 ## The problem Hive solves
 
@@ -125,32 +126,38 @@ or approval queue.
 
 ## A shared game change in practice
 
-A request such as “make combat builds change Day decisions” starts with
-**EXPLORE**. Here, Day is the town phase between combats. Members inspect the
-current game, identify the missing player decision, and propose distinct ways
-to create it, with tradeoffs and failure cases. They stop at a proposal unless
-the Beekeeper asks for a prototype or implementation. A complete matrix of
-passives is not the goal.
+**Debter's Drowned World playground** is a real example. The Beekeeper asked for
+an isolated prototype where they could explore chunks, edit terrain, equip real
+cards, and try a horde while keeping campaign saves separate. The selected
+prototype gave members a concrete **COMMIT** direction; the creator still owns
+the judgment about what should become the game.
 
-Once the Beekeeper selects a direction, members switch to **COMMIT**. For
-example, `nova` can implement the selected card interaction while `cedar` works
-on its Day presentation. Both use ordinary project tools in persistent Claude
-Code or Codex sessions. They claim shared seams, communicate interface changes
-in the one **Room**, handle save consequences, and test the selected behavior.
-These are temporary areas of attention; each member keeps its identity as its
-focus changes.
+Our small documentation demo condenses that work into three fictional members:
 
-If the work spans compaction, member-local notes preserve selected intent,
-invariants, and unresolved questions. Shared contracts reuse existing project
-documents. Routine implementation steps stay in the working session; the Room
-carries facts and handoffs that another member can act on.
+- `nova` connects seeded terrain and Save/Continue. `cedar` connects catalogue
+  ownership to the live deck. They share a restoration dependency in the Room.
+- `lark` checks the native game and finds the old Calendar header intercepting
+  **New World** clicks. A real input failure changes what needs fixing before
+  the prototype can be reviewed.
+- After integration and evidence repair, the team releases its claims and
+  delivers one **devlog** with game captures and remaining questions.
 
-For a meaningful completed feature, a member can write a **dev-log article**
-with native screenshots or a short gameplay clip, the relevant checks, and
-remaining limits. The Beekeeper reads it in Hive's WebUI and can ask follow-up
-questions in the Room. Tests establish that the selected rules work; captures
-show what was rendered; playtesting establishes whether the change feels right.
-The same project files, notes, and artifacts remain accessible through Unix.
+These are temporary areas of attention. Members remain generalists in one Room,
+using project grounding, narrow claims, and local notes where useful.
+
+![Native Debter prototype capture showing an owned Ember Pin card in combat](docs/demo/debter-playground/owned_card_cast.png)
+
+*Existing native scripted evidence from the isolated review branch, bound to
+`d5a4eac9`; the prototype is unmerged. This capture shows rendered combat, while
+human playtesting still needs to judge feel and balance. Hana Caraka art by
+[Otterisk](https://otterisk.itch.io/).*
+
+The Beekeeper can read the feature article in Hive, inspect its captures in the
+project explorer, and ask follow-up questions in the Room. Open the
+[sample article](docs/demo/debter-playground/index.md) or run the
+[read-only dashboard demo](docs/demo/README.md) locally. The example includes
+four real gameplay images with source hashes, without copying live Room history
+or licensed asset packs.
 
 ## Feature tour
 
@@ -172,7 +179,7 @@ or a composer reset after submitting its text, without waiting for the member's
 work to finish. Unconfirmed submission is reported separately from delivery
 failure; check the terminal before resending to avoid duplicates.
 
-![Expanded Room showing an API and client handoff](docs/dashboard-room.png)
+![Expanded demo Room showing terrain, save, card, and native-input handoffs](docs/dashboard-game-room.png)
 
 Members can ask `hive say '@beekeeper Which direction should we use?'`.
 Explicit `@beekeeper` mentions appear as separate cards in the Room's **For you**
@@ -216,7 +223,7 @@ keeps member notes, scratch, state, Room history, and curated knowledge availabl
 when you need them. Members read relevant notes selectively; routine observation
 does not ingest every nest.
 
-![Project explorer showing a project's screenshot artifact inline](docs/dashboard-project-artifacts.png)
+![Project explorer previewing a real Debter gameplay capture in the isolated demo](docs/dashboard-game-artifacts.png)
 
 ### Dev logs: read feature articles with captures
 
@@ -232,40 +239,42 @@ capture. A useful article explains what changed for the player and what remains
 uncertain. Keep rule tests, simulations, visual captures, and human playtest
 feedback distinct. An exploration proposal stays labeled as a hypothesis.
 
-![Dev-log article reader with a screenshot and feature explanation](docs/dashboard-devlogs.png)
+![Dev-log reader with Debter's prototype explanation and native gameplay capture](docs/dashboard-game-devlog.png)
 
-Members write ordinary files in shared artifacts. For example, a game feature
-could use this bundle:
+Members write ordinary files in shared artifacts. The game demo uses this
+article layout:
 
 ```text
-/srv/hive/artifacts/devlogs/titantwoshot/blacksmith-route/
+/srv/hive/artifacts/devlogs/debter/drowned-chunk-playground/
 ├── index.md
-├── blacksmith-route.png
-└── rare-fire-route.mp4
+├── world_water.png
+├── world_edit_continue.png
+├── owned_card_cast.png
+└── horde_objective.png
 ```
 
 An article can start with a heading alone, or optional TOML metadata:
 
 ```markdown
 +++
-title = "A combat card changes the Blacksmith decision"
-summary = "A Rare Fire card gives the player a reason to choose the Blacksmith route."
-author = "cedar"
-date = 2026-10-11T13:00:00Z
-commit = "abc1234"
-cover = "blacksmith-route.png"
+title = "Drowned World: explore, edit, fight"
+summary = "An isolated playground connects terrain edits, real cards, and a horde."
+author = "Debter team"
+date = 2026-10-11T13:09:03Z
+commit = "d5a4eac9"
+cover = "world_water.png"
 +++
 
 ## What changed
-Owning this Rare Fire card makes the player consider investing in the
-Blacksmith route during Day.
+Players can edit terrain, save it, continue, and try an owned card in combat.
+This prototype remains on a review branch, unmerged into the campaign.
 
-![The Day decision with the Rare Fire card](blacksmith-route.png)
-![The combat-to-Day interaction](rare-fire-route.mp4)
+![Native game capture beside generated water](world_water.png)
+![Native scripted card-cast check](owned_card_cast.png)
 
 ## Evidence and limits
-Record which rule/save checks ran and which native build was captured.
-Keep playtest feedback separate from automated evidence.
+Identify the rule/save checks and build behind the captures.
+Human playtesting still needs to establish feel and balance.
 ```
 
 Place media beside the article, then write `index.md` last or replace it

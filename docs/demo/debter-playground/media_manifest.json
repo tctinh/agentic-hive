@@ -1,0 +1,30 @@
+{
+  "commit": "d5a4eac90de6f6c5a0e173d06cca073773b4398e",
+  "scope": "Unchanged existing native gameplay captures; no new gameplay run.",
+  "files": [
+    {
+      "path": "world_water.png",
+      "source": "peer_receipts/sol6_view/packed_hero_75_final1/07_water_actual_collision.png",
+      "sha256": "24053f35df32fe527daba6ed631e0d21b130f51789e8ab68328a7cab7a53392a",
+      "bytes": 21761
+    },
+    {
+      "path": "world_edit_continue.png",
+      "source": "peer_receipts/sol2_world_controls_75db/runs/world/06_continue_edit.png",
+      "sha256": "0416c4ee3b29aa28a665c02af9e17d40bc9c1fd61b07bb36d75d1aa78db1485b",
+      "bytes": 16560
+    },
+    {
+      "path": "owned_card_cast.png",
+      "source": "catalogue_final2/run_75db_native_rebind/12_cast_ember_pin.png",
+      "sha256": "9d0afc1bb3b85c7b34cefa0620e7eb5518d4f2e898e1215fcec9621072366113",
+      "bytes": 17264
+    },
+    {
+      "path": "horde_objective.png",
+      "source": "peer_receipts/sol7_world/native_horde_attempt4/03_scheduled_objective_contact.png",
+      "sha256": "117a8ed362ddc7ecfa8865e68aad790a094ce50ac5275805ec33680c7a8ed7df",
+      "bytes": 13139
+    }
+  ]
+}

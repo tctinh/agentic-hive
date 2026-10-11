@@ -129,8 +129,8 @@ A request such as “make combat builds change Day decisions” starts with
 **EXPLORE**. Here, Day is the town phase between combats. Members inspect the
 current game, identify the missing player decision, and propose distinct ways
 to create it, with tradeoffs and failure cases. They stop at a proposal unless
-the Beekeeper asks for a prototype or
-implementation. A complete matrix of passives is not the goal.
+the Beekeeper asks for a prototype or implementation. A complete matrix of
+passives is not the goal.
 
 Once the Beekeeper selects a direction, members switch to **COMMIT**. For
 example, `nova` can implement the selected card interaction while `cedar` works
@@ -279,6 +279,22 @@ This does not expose Hive publicly; a future public site can reuse the bundles.
 The [member instructions](share/member-instruction.md) encourage a useful
 feature wrap-up with evidence and limits. Trivial fixes need no article, and
 exploration stays labeled as a hypothesis.
+
+The writing protocol is in that file, beginning “For a meaningful completed
+feature.” Existing sessions can read the current installed guide without
+restarting their harness:
+
+```sh
+# NixOS
+cat /run/current-system/sw/share/agentic-hive/member-instruction.md
+# Portable install (adjust for a custom prefix)
+cat /usr/local/share/agentic-hive/member-instruction.md
+```
+
+`hive knowledge search devlog` also finds any locally curated protocol pointers
+in the Knowledge Vault. A prototype article must identify its prototype status
+and unresolved evidence; describe a feature as complete only after its checks
+and integration evidence are complete.
 
 ### Each member has its own session control panel
 

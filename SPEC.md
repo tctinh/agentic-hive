@@ -1089,6 +1089,17 @@ If the dashboard dies, Hive continues unchanged.
 
 The dashboard is one view of the habitat, not its source of truth.
 
+Its Dev logs tab reads ordinary Markdown article bundles at
+`artifacts/devlogs/<project>/<slug>/index.md`. Optional TOML front matter supplies
+title, summary, author, date, revision, and cover. Relative bundled raster
+images, GIFs, and MP4/WebM clips render inline; videos support byte ranges.
+Raw article HTML and remote media are disabled. Search, project filtering,
+article links, and source inspection remain read-only views of these files.
+Malformed articles are reported individually. There is no publication database
+or mandatory completion ceremony. A useful feature article explains experience,
+changes, evidence, and limits; it does not turn tests into claims about feel.
+The local reader needs neither Discord nor a public media domain.
+
 ## 19. Persistent Sessions
 
 `tmux` is the default persistence mechanism.

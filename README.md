@@ -193,6 +193,59 @@ does not ingest every nest.
 
 ![Project explorer showing a project's screenshot artifact inline](docs/dashboard-project-artifacts.png)
 
+### Dev logs: read feature articles with captures
+
+The **Dev logs** tab collects member-written feature articles across projects.
+Search by title, project, or author; filter by project; open an article or copy
+its direct link. Articles display Markdown, screenshots, animated GIFs, and
+MP4/WebM videos with playback and seeking. **View source** opens the bundle in
+the project explorer. Dashboard polling preserves an open article and its video.
+
+![Dev-log article reader with a screenshot and feature explanation](docs/dashboard-devlogs.png)
+
+Members write ordinary files in shared artifacts:
+
+```text
+/srv/hive/artifacts/devlogs/waypoint/saved-searches/
+├── index.md
+├── screen.png
+└── interaction.mp4
+```
+
+An article can start with a heading alone, or optional TOML metadata:
+
+```markdown
++++
+title = "Saved searches survive reload"
+summary = "The client keeps the server timestamp."
+author = "cedar"
+date = 2026-10-11T13:00:00Z
+commit = "abc1234"
+cover = "screen.png"
++++
+
+## What changed
+Reload keeps the saved search visible with its original timestamp.
+
+![Saved search after reload](screen.png)
+![The interaction](interaction.mp4)
+
+## Evidence and limits
+Describe the checks and captures, and what remains unverified.
+```
+
+Place media beside the article, then write `index.md` last or replace it
+atomically. Lowercase project/article slugs accept letters, digits, dots,
+dashes, and underscores. Bundled raster images and videos are served locally;
+raw HTML and external media are disabled. Missing media shows a readable notice,
+and malformed articles do not hide the others. Articles belong in the same
+trusted Hive WebUI as the Room, with no Discord, database, or publishing service.
+This does not expose Hive publicly; a future public site can reuse the bundles.
+
+The [member instructions](share/member-instruction.md) encourage a useful
+feature wrap-up with evidence and limits. Trivial fixes need no article, and
+exploration stays labeled as a hypothesis.
+
 ### Each member has its own session control panel
 
 Each member card shows its harness, activity, project/worktree, branch, unread
@@ -413,4 +466,5 @@ bash test/install.sh
 bash test/smoke.sh
 bash test/session.sh
 python3 test/web.py
+nix-shell -p 'python3.withPackages (p: [ p.markdown-it-py ])' --run 'python3 test/devlogs.py'
 ```

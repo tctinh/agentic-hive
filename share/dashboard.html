@@ -260,6 +260,34 @@
   .quota-window .bar { margin-top: 3px; }
   @media (max-width: 640px) { .host { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .devlog-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+  .devlog-tools input, .devlog-tools select { min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); font: inherit; }
+  .devlog-tools input { flex: 1; min-width: 170px; }
+  .devlog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 16px; }
+  .devlog-card { display: block; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; color: var(--ink); text-decoration: none; }
+  .devlog-card:hover { border-color: var(--accent); }
+  .devlog-card img { display: block; width: 100%; height: 175px; object-fit: cover; background: var(--chip); }
+  .devlog-card .description { padding: 15px; }
+  .devlog-card h3 { margin: 8px 0; font-size: 19px; overflow-wrap: anywhere; }
+  .devlog-card p { margin: 0; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+  .devlog-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .devlog-reader { max-width: 840px; margin: 0 auto; }
+  .devlog-reader h1 { font-size: clamp(26px, 4vw, 38px); line-height: 1.2; margin: 24px 0 12px; overflow-wrap: anywhere; }
+  .devlog-reader .lead { font-size: 17px; color: var(--muted); line-height: 1.7; margin: 20px 0; }
+  .devlog-body { font-size: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+  .devlog-body h1, .devlog-body h2, .devlog-body h3 { color: var(--ink); text-transform: none; letter-spacing: 0; line-height: 1.3; margin: 28px 0 12px; }
+  .devlog-body h2 { font-size: 23px; } .devlog-body h3 { font-size: 19px; }
+  .devlog-body a { color: var(--accent); }
+  .devlog-body blockquote { margin: 20px 0; padding-left: 16px; border-left: 3px solid var(--accent); color: var(--muted); }
+  .devlog-body pre { overflow: auto; padding: 16px; background: var(--chip); border-radius: 8px; font-size: 13px; }
+  .devlog-body code { font-family: var(--mono); }
+  .devlog-body table { display: block; max-width: 100%; overflow-x: auto; margin: 20px 0; }
+  .devlog-body th { text-align: left; padding: 6px; }
+  .devlog-media { display: block; margin: 22px 0; }
+  .devlog-media img, .devlog-media video { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; border-radius: 8px; background: var(--chip); }
+  .devlog-caption { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .devlog-missing { color: var(--dead); }
+  #devlog-status { margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -292,7 +320,7 @@
   </div>
 
   <nav class="tabs" aria-label="Dashboard views">
-    <button class="active" data-tab="overview">Members &amp; Room</button><button data-tab="activity">Claims &amp; Projects</button><button data-tab="files">Project explorer</button>
+    <button class="active" data-tab="overview">Members &amp; Room</button><button data-tab="activity">Claims &amp; Projects</button><button data-tab="files">Project explorer</button><button data-tab="devlogs">Dev logs</button>
   </nav>
   <div class="panel dashboard-grid" id="panel-overview">
   <section>
@@ -341,6 +369,25 @@
       <div><div class="file-crumbs" id="file-crumbs"></div><div class="file-list" id="file-list"></div></div>
       <div class="file-preview" id="file-preview"><span class="empty">Choose a project, then a document or artifact. Text and images open here; other files can be downloaded.</span></div>
     </div></section>
+  </div>
+  <div class="panel" id="panel-devlogs" hidden>
+    <section>
+      <div id="devlog-feed">
+        <h2>Dev logs <span class="n" id="devlog-count"></span></h2>
+        <p class="file-intro">Feature articles and captures from your projects.</p>
+        <div class="devlog-tools">
+          <input id="devlog-search" type="search" aria-label="Search dev logs" placeholder="Search articles, projects, or authors…" oninput="renderDevlogs()">
+          <select id="devlog-project" aria-label="Filter dev logs by project" onchange="renderDevlogs()"><option value="">All projects</option></select>
+          <button class="top-action" type="button" onclick="loadDevlogs(true)">Refresh</button>
+        </div>
+        <div class="devlog-grid" id="devlog-list"></div>
+      </div>
+      <div id="devlog-reader" class="devlog-reader" hidden>
+        <div class="action-row"><button type="button" data-tab="devlogs">← All dev logs</button><button type="button" id="devlog-copy" onclick="copyDevlogLink()">Copy article link</button><button type="button" id="devlog-source" onclick="openDevlogSource()">View source</button></div>
+        <article id="devlog-article"></article>
+      </div>
+      <div class="feedback" id="devlog-status" role="status"></div>
+    </section>
   </div>
   <footer>Hive dashboard · refreshes every 3 seconds</footer>
 </div>
@@ -460,15 +507,108 @@ let currentRoomTab = "all";
 let mentionAlerts = false;
 try { mentionAlerts = localStorage.getItem("hive-mention-alerts") === "true"; } catch (_) {}
 
-function showTab(tab) {
+function showTab(tab, updateHash = true) {
+  if (!["overview", "activity", "files", "devlogs"].includes(tab)) return;
   currentTab = tab;
-  window.location.hash = tab;
-  for (const name of ["overview", "activity", "files"]) {
+  if (updateHash) window.location.hash = tab;
+  for (const name of ["overview", "activity", "files", "devlogs"]) {
     $("panel-" + name).hidden = name !== tab;
     document.querySelector(`[data-tab="${name}"]`).classList.toggle("active", name === tab);
   }
   if (tab === "files" && !filesLoaded) openFolder("projects");
+  if (tab !== "devlogs") $("devlog-article").querySelectorAll("video").forEach(video => video.pause());
 }
+
+let devlogData = null;
+let devlogRequest = 0;
+let currentDevlog = null;
+let devlogFeedKey = null;
+let devlogsLoading = false;
+function devlogMeta(post) {
+  return [post.project, post.author, new Date(post.date).toLocaleDateString(undefined, {year:"numeric",month:"short",day:"numeric"})].filter(Boolean).join(" · ");
+}
+async function loadDevlogs(force = false) {
+  if (devlogsLoading) return;
+  devlogsLoading = true;
+  if (!devlogData) $("devlog-list").textContent = "Loading articles…";
+  try {
+    const response = await fetch("/api/devlogs", {cache:"no-store"});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const key = JSON.stringify(data);
+    if (force || key !== devlogFeedKey) {
+      devlogData = data; devlogFeedKey = key;
+      const project = $("devlog-project").value;
+      const projects = [...new Set(data.articles.map(post=>post.project))].sort();
+      $("devlog-project").innerHTML = '<option value="">All projects</option>' + projects.map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join("");
+      $("devlog-project").value = projects.includes(project) ? project : "";
+      renderDevlogs();
+    }
+  } catch (error) {
+    if (!currentDevlog) $("devlog-status").textContent = `Could not load dev logs: ${error.message}`;
+  } finally { devlogsLoading = false; }
+}
+function renderDevlogs() {
+  if (!devlogData) return;
+  const query = $("devlog-search").value.toLowerCase().trim(), project = $("devlog-project").value;
+  const posts = devlogData.articles.filter(post=>(!project || post.project===project) && (!query || [post.title,post.summary,post.author,post.project].join(" ").toLowerCase().includes(query)));
+  $("devlog-count").textContent = `· ${posts.length}`;
+  $("devlog-list").innerHTML = posts.length ? posts.map(post=>`<a class="devlog-card" href="#devlog=${encodeURIComponent(post.id)}">
+    ${post.cover ? `<img src="${esc(post.cover)}" alt="${esc(post.title)}" loading="lazy">` : ""}
+    <div class="description"><div class="devlog-meta">${esc(devlogMeta(post))}</div><h3>${esc(post.title)}</h3><p>${esc(post.summary)}</p></div></a>`).join("") : `<p class="empty">${devlogData.articles.length ? "No articles match this search." : "No dev logs yet. Members can write a feature article with captures in shared artifacts/devlogs."}</p>`;
+  $("devlog-status").textContent = devlogData.errors.length ? `${devlogData.errors.length} article(s) could not be read: ${devlogData.errors.map(item=>`${item.id}: ${item.error}`).join("; ")}` : "";
+}
+function showDevlogFeed() {
+  ++devlogRequest;
+  $("devlog-article").querySelectorAll("video").forEach(video=>video.pause());
+  currentDevlog = null;
+  $("devlog-reader").hidden = true; $("devlog-feed").hidden = false;
+  $("devlog-status").textContent = "";
+  renderDevlogs(); loadDevlogs();
+}
+async function openDevlog(identifier) {
+  showTab("devlogs", false);
+  if (currentDevlog?.id === identifier) return;
+  const request = ++devlogRequest;
+  currentDevlog = null;
+  $("devlog-feed").hidden = true; $("devlog-reader").hidden = false;
+  $("devlog-article").textContent = "Loading article…";
+  $("devlog-status").textContent = "";
+  $("devlog-copy").disabled = true; $("devlog-source").disabled = true;
+  try {
+    const response = await fetch(`/api/devlog?id=${encodeURIComponent(identifier)}`, {cache:"no-store"});
+    const post = await response.json();
+    if (request !== devlogRequest) return;
+    if (!response.ok) throw new Error(post.error || `HTTP ${response.status}`);
+    currentDevlog = post;
+    $("devlog-article").innerHTML = `<h1>${esc(post.title)}</h1><div class="devlog-meta">${esc(devlogMeta(post))}${post.commit ? ` · Revision ${esc(post.commit)}` : ""}</div>${post.summary ? `<p class="lead">${esc(post.summary)}</p>` : ""}<div class="devlog-body">${post.html}</div>`;
+    $("devlog-copy").disabled = false; $("devlog-source").disabled = false;
+  } catch (error) {
+    if (request === devlogRequest) $("devlog-article").textContent = `Could not open article: ${error.message}`;
+  }
+}
+async function copyDevlogLink() {
+  if (!currentDevlog) return;
+  try { await copyText(new URL(currentDevlog.url, location.href).href); $("devlog-status").textContent = "Article link copied."; }
+  catch (error) { $("devlog-status").textContent = `Could not copy link: ${error.message}`; }
+}
+async function openDevlogSource() {
+  if (!currentDevlog) return;
+  const path = currentDevlog.source;
+  filesLoaded = true; showTab("files");
+  await openFolder(path.slice(0, path.lastIndexOf("/"))); openFile(path);
+}
+function routeDashboard() {
+  const hash = location.hash.slice(1);
+  if (hash.startsWith("devlog=")) {
+    try { openDevlog(decodeURIComponent(hash.slice(7))); }
+    catch (_) { showTab("devlogs", false); showDevlogFeed(); }
+  } else if (hash === "devlogs") { showTab("devlogs", false); showDevlogFeed(); }
+  else if (["activity","claims","commits"].includes(hash)) showTab("activity", false);
+  else if (hash === "files") showTab("files", false);
+  else showTab("overview", false);
+}
+window.addEventListener("hashchange", routeDashboard);
 
 function myBeekeeper() { return dashboardData?.viewer?.member || "beekeeper"; }
 function humanNames() { return new Map((dashboardData?.beekeepers || [{member:"beekeeper",name:"beekeeper"}]).map(person=>[person.member,person.name])); }
@@ -817,6 +957,7 @@ async function tick() {
     if (!r.ok) throw new Error(r.status);
     render(await r.json());
     $("app").classList.remove("stale");
+    if (currentTab === "devlogs" && !$("devlog-feed").hidden) loadDevlogs();
   } catch (e) {
     $("app").classList.add("stale");
   } finally {
@@ -1302,10 +1443,7 @@ async function sendTerminalLine() {
 }
 
 const initial = /*__INITIAL_STATE__*/null;
-const initialTab = window.location.hash.slice(1);
-if (["overview", "members", "room"].includes(initialTab)) showTab("overview");
-if (["activity", "claims", "commits"].includes(initialTab)) showTab("activity");
-if (initialTab === "files") showTab("files");
+routeDashboard();
 if (initial) render(initial);
 setTimeout(tick, initial ? 3000 : 0);
 </script>

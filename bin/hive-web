@@ -7,6 +7,9 @@ GET /            the dashboard page (polls /api/state)
 GET /api/state   JSON snapshot of members, claims, Room and host
 GET /api/files   Browse projects, shared files, and member nests
 GET /api/file    Preview or download one allowed file
+GET /api/devlogs List dev-log articles in shared artifacts
+GET /api/devlog  Read one Markdown article with bundled media
+GET /api/devlog-media Serve bundled images/GIFs/video, including byte ranges
 POST /api/room-done  Dismiss one Beekeeper notification
 
 Runs as the unprivileged hive user. Telemetry is a hint; process state wins.
@@ -53,6 +56,7 @@ BIN_DIR = Path(__file__).resolve().parent
 BEEKEEPER_LOCK = threading.Lock()
 sys.path.insert(0, str(SHARE if (SHARE / "hive_members.py").is_file() else BIN_DIR.parent / "share"))
 import hive_members
+import hive_devlogs
 
 
 def is_beekeeper(member):
@@ -729,6 +733,44 @@ class Handler(BaseHTTPRequestHandler):
         return not origin or (urlparse(origin).scheme in ("http", "https")
                               and urlparse(origin).netloc == self.headers.get("Host"))
 
+    def _devlog_media(self, identifier, name):
+        target, mime = hive_devlogs.media(HIVE_ROOT, identifier, name)
+        size = target.stat().st_size
+        start, end, status = 0, size - 1, 200
+        requested = self.headers.get("Range") if self.command == "GET" else None
+        if requested:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+            valid = match and (match[1] or match[2]) and size > 0
+            if valid:
+                if match[1]:
+                    start = int(match[1]); end = min(int(match[2]), end) if match[2] else end
+                else:
+                    start = max(0, size - int(match[2]))
+                valid = 0 <= start <= end < size
+            if not valid:
+                self._send(416, "invalid media range\n", "text/plain", (("Content-Range", f"bytes */{size}"),))
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if self.command != "HEAD":
+            with target.open("rb") as source:
+                source.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = source.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
     def _json_request(self):
         length = int(self.headers.get("Content-Length", "0"))
         if not 0 < length <= 65536:
@@ -755,6 +797,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(state(viewer)), "application/json")
             except Exception as e:  # never take the page down; report instead
                 self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif path in ("/api/devlogs", "/api/devlog", "/api/devlog-media"):
+            try:
+                query = parse_qs(url.query)
+                identifier = query.get("id", [""])[0]
+                if path == "/api/devlogs":
+                    self._send(200, json.dumps(hive_devlogs.articles(HIVE_ROOT)), "application/json")
+                elif path == "/api/devlog":
+                    self._send(200, json.dumps(hive_devlogs.article(HIVE_ROOT, identifier)), "application/json")
+                else:
+                    self._devlog_media(identifier, query.get("path", [""])[0])
+            except (OSError, ValueError) as error:
+                self._send(404, json.dumps({"error": str(error)}), "application/json")
         elif path in ("/api/files", "/api/file"):
             try:
                 rel = parse_qs(url.query).get("path", [""])[0]

@@ -109,7 +109,7 @@ TMUX_CONF=/etc/tmux.conf.d/agentic-hive.conf
 HOOKS=/etc/claude-code/managed-settings.json
 
 BIN_FILES=(hive hive-hook hive-launch hive-dash hive-web hive-attach hive-statusline hive-member hive-session)
-SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py)
+SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py hive_devlogs.py)
 
 # Assets ship next to this script in the repo (install/ sits beside bin/ and share/).
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -171,10 +171,15 @@ pkg_family() {
 # family_row <family> -> "<install command>|<packages>"
 family_row() {
   case $1 in
-    pacman)  printf '%s' 'pacman -S --needed --noconfirm|bash python jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses' ;;
-    apt-get) printf '%s' 'apt-get install -y|bash python3 jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses-bin' ;;
-    dnf)     printf '%s' 'dnf install -y|bash python3 jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses' ;;
-    zypper)  printf '%s' 'zypper --non-interactive install|bash python3 jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses' ;;
+    pacman)  printf '%s' 'pacman -S --needed --noconfirm|bash python python-markdown-it-py python-tomli jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses' ;;
+    apt-get) printf '%s' 'apt-get install -y|bash python3 python3-markdown-it python3-tomli jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses-bin' ;;
+    dnf)     printf '%s' 'dnf install -y|bash python3 python3-markdown-it-py python3-tomli jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses' ;;
+    zypper)
+      # openSUSE names modules for the installed interpreter's Python flavor.
+      local flavor
+      flavor=$(python3 -c 'import sys; print("python%d%d" % sys.version_info[:2])')
+      printf '%s' "zypper --non-interactive install|bash python3 $flavor-markdown-it-py $flavor-tomli jq gawk util-linux coreutils git tmux ripgrep acl grep sed findutils sudo ncurses"
+      ;;
     *) return 1 ;;
   esac
 }

@@ -169,7 +169,7 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         run.assert_not_called()
 
     def test_stale_working_turn_keeps_guard_state_and_exposes_unknown_freshness(self):
-        path=self.root/'telemetry/members/alice.json';path.parent.mkdir(parents=True)
+        path=self.root/'telemetry/members/alice.json';path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text('{"status":"working","harness":"codex","last_activity":"2000-01-01T00:00:00+00:00"}')
         with patch.object(web,'member_panes',return_value={'alice':{}}), patch.object(web,'pane_harness_pid',return_value=123):
             member=next(m for m in web.members(0,1700000000,[]) if m['member']=='alice')

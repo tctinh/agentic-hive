@@ -34,7 +34,7 @@ usage:
   hive claims
   hive claim break <resource>
   hive delegate <target> --task <msg> [--worktree <dir>] [--branch <br>] [--claim <res>]
-  hive delegate done [summary]
+  hive delegate done [--task-id ID] [summary]
   hive delegate retry|cancel <target>
   hive message <member> <message...>  (wake or prompt another member)
   hive knowledge search <query...>
@@ -482,22 +482,28 @@ cmd_delegate() {
   # Reserve and persist before notifying. The same ID is used on every retry.
   flock -u 7
   exec 7>&-
-  delegate_notify "$target_state"
+  delegate_notify "$target_state" "$task_id"
   echo "hive: reserved task $task_id for $target (depth: 1)"
 }
 
 delegate_notify() {
-  local record="$1" target parent task_id request_id body report status saved resource directory
-  target=$(jq -r .target_member "$record"); parent=$(jq -r .parent_member "$record")
-  task_id=$(jq -r .task_id "$record"); request_id=$(jq -r .request_id "$record")
+  local record="$1" expected="${2:-}" target parent task_id request_id body report status saved resource directory snapshot
+  exec 7>>"${record%/*}/.assignment.lock"
+  flock -w 2 7 || die "assignment status lock busy"
+  [[ -f $record ]] || die "assignment changed before notification; inspect its completion record"
+  snapshot=$(cat "$record")
+  [[ -z $expected || $(jq -r .task_id <<<"$snapshot") == "$expected" ]] || die "assignment changed before notification; no new task was notified"
+  flock -u 7; exec 7>&-
+  target=$(jq -r .target_member <<<"$snapshot"); parent=$(jq -r .parent_member <<<"$snapshot")
+  task_id=$(jq -r .task_id <<<"$snapshot"); request_id=$(jq -r .request_id <<<"$snapshot")
   while IFS= read -r resource; do
     directory=$(claim_dir "$resource")
     [[ $(cat "$directory/owner" 2>/dev/null || true) == "$target" ]] ||
       die "reservation $task_id retained, but claim $resource is not ready; repair claims before retrying"
-  done < <(jq -r '.claims[]?' "$record")
+  done < <(jq -r '.claims[]?' <<<"$snapshot")
   body=$(jq -r '"DELEGATE -> \(.target_member): \(.task)" +
     (if .worktree then " | worktree: " + .worktree else "" end) +
-    (if .branch then " | branch: " + .branch else "" end)' "$record")
+    (if .branch then " | branch: " + .branch else "" end)' <<<"$snapshot")
   # Post is durable before any wake attempt. A failed/unconfirmed adapter
   # leaves the reservation and message pending, with an explicit retry path.
   if ! HIVE_MEMBER="$parent" python3 "$MESSAGE_HELPER" post --json --room-only --channel dm --kind request \
@@ -537,8 +543,9 @@ cmd_delegate_manage() {
   parent=$(jq -r .parent_member "$record")
   [[ $m == "$parent" || $m == "$target" ]] || is_beekeeper "$m" || die "only the requester, assignee or owner can $action this assignment"
   if [[ $action == retry ]]; then
+    task_id=$(jq -r .task_id "$record")
     flock -u 7; exec 7>&-
-    delegate_notify "$record"
+    delegate_notify "$record" "$task_id"
     return
   fi
   request_id=$(jq -r .request_id "$record");task_id=$(jq -r .task_id "$record")
@@ -556,10 +563,20 @@ cmd_delegate_done() {
   require_init
   local m; m=$(require_member)
   local target_state="$(nest_dir "$m")/state/delegation.json" done_state="$(nest_dir "$m")/state/delegation.done.json"
-  local summary="${*:-subtask complete}" parent task_id request_id result_id r d claims=() report
+  local expected="" completing=1 summary parent task_id request_id result_id r d claims=() report
+  if [[ ${1:-} == --task-id ]]; then
+    expected="${2:?--task-id requires ID}"; shift 2
+    [[ $expected =~ ^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$ ]] || die "invalid task ID"
+  fi
+  summary="${*:-subtask complete}"
   exec 7>>"$(nest_dir "$m")/state/.assignment.lock"
   flock -w 2 7 || die "assignment lock busy"
-  if [[ -f $target_state ]]; then
+  if [[ -n $expected && ( ! -f $target_state || $(jq -r .task_id "$target_state") != "$expected" ) ]]; then
+    done_state="$(nest_dir "$m")/state/tasks/$expected.json"
+    [[ -f $done_state ]] || die "no completed record for task $expected; active assignment left intact"
+    completing=0
+  fi
+  if ((completing)) && [[ -f $target_state ]]; then
     parent=$(jq -r .parent_member "$target_state")
     task_id=$(jq -r .task_id "$target_state");request_id=$(jq -r .request_id "$target_state")
     result_id="$task_id-result"
@@ -577,7 +594,7 @@ cmd_delegate_done() {
       '.summary=$summary | .result_id=$result_id | .completed_at=$now | .status="completed"' "$target_state" |
       python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$done_state"
     mkdir -p "$(nest_dir "$m")/state/tasks"
-    cp "$done_state" "$(nest_dir "$m")/state/tasks/$task_id.json"
+    python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$(nest_dir "$m")/state/tasks/$task_id.json" <"$done_state"
     rm -f "$target_state"
   else
     [[ -f $done_state ]] || die "no delegation record for $m"
@@ -589,12 +606,12 @@ cmd_delegate_done() {
   HIVE_MEMBER="$m" python3 "$MESSAGE_HELPER" post --json --room-only --channel dm --kind result \
     --id "$result_id" --task-id "$task_id" --reply-to "$request_id" --to "$parent" \
     -- "DONE (delegated by $parent): $summary" >/dev/null ||
-    die "completion $task_id saved; result remains pending; repeat hive delegate done"
+    die "completion $task_id saved; result remains pending; repeat hive delegate done --task-id $task_id"
   flock -u 7; exec 7>&-
   report=$(python3 "$MESSAGE_HELPER" dispatch "$result_id") || die "completion saved; result notification pending"
   echo "$report"
   [[ $(jq '.failed | length' <<<"$report") == 0 && $(jq '.unconfirmed | length' <<<"$report") == 0 ]] ||
-    die "completion $task_id saved; requester notification pending; inspect before repeating hive delegate done"
+    die "completion $task_id saved; requester notification pending; inspect before repeating hive delegate done --task-id $task_id"
 }
 
 main() {

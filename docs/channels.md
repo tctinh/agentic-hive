@@ -76,6 +76,8 @@ and its request ID. `hive delegate retry MEMBER` reuses it after inspection.
 `hive delegate cancel MEMBER` requests a safe stop and retains claims/reservation
 until the assignee reports completion. `hive delegate done` persists completion
 and an idempotent direct result, including when `HIVE_ROOM_PROJECTION=0`.
+For a completion retry, use `hive delegate done --task-id ORIGINAL_TASK_ID`
+so it cannot complete a newer assignment.
 
 Wake preserves supported safe launch settings: model, Codex profile/sandbox/
 approval/reasoning effort, or Claude permission mode/effort. Arbitrary prompts,

@@ -56,7 +56,8 @@ every channel subscriber responsible or elevate peer text into owner authority.
 
 Use `hive message <member> <request>` for a DM. For a bounded subtask with claims,
 use `hive delegate <member> --task <request>`; the target reports a concise result
-with `hive delegate done <summary>`. An active reservation prevents overlapping
+with `hive delegate done --task-id <id> <summary>`. Task IDs bind retries
+to the original work even if a newer assignment exists. An active reservation prevents overlapping
 assignment even without fresh telemetry. Failed delivery remains queued; inspect
 before `hive delegate retry <member>`. Cancellation keeps the reservation/claims
 until the target safely stops and reports completion. Never repeat completed

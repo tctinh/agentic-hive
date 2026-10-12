@@ -126,6 +126,16 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 2)
         self.assertEqual(self.rows()[1]["recipients"], ["alice"])
 
+    def test_result_retry_by_task_id_preserves_new_active_assignment(self):
+        self.run_hive("alice", "delegate", "bob", "--task", "first")
+        first = json.loads(self.state().read_text())["task_id"]
+        self.run_hive("bob", "delegate", "done", "first ready", env={"TEST_FAIL": "1"}, success=False)
+        self.run_hive("carol", "delegate", "bob", "--task", "second")
+        second = json.loads(self.state().read_text())["task_id"]
+        self.run_hive("bob", "delegate", "done", "--task-id", first, "retry")
+        self.assertEqual(json.loads(self.state().read_text())["task_id"], second)
+        self.assertEqual(len([row for row in self.rows() if row["kind"] == "result"]), 1)
+
     def test_stale_working_target_is_rejected_without_reservation(self):
         path = Path(self.env["HIVE_ROOT"]) / "telemetry/members/bob.json"
         path.write_text('{"status":"working","last_activity":"2000-01-01T00:00:00+00:00"}')

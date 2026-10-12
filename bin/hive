@@ -373,6 +373,7 @@ cmd_message() {
 
 cmd_delegate() {
   if [[ ${1:-} == done ]]; then shift; cmd_delegate_done "$@"; return; fi
+  if [[ ${1:-} == retry || ${1:-} == cancel ]]; then cmd_delegate_manage "$@"; return; fi
   require_init
   local m
   m=$(require_member)
@@ -408,21 +409,15 @@ cmd_delegate() {
 
   [[ -n $task ]] || die "--task is required"
 
-  # Check target availability
-  local tele_file="$HIVE_ROOT/telemetry/members/$target.json"
-  if [[ -f $tele_file ]]; then
-    local target_status last_act
-    target_status=$(jq -r '.status // empty' "$tele_file" 2>/dev/null || echo "")
-    last_act=$(jq -r '.last_activity // empty' "$tele_file" 2>/dev/null || echo "")
-    if [[ $target_status == "working" && -n $last_act ]]; then
-      local now_sec act_sec
-      now_sec=$(date +%s)
-      act_sec=$(date -d "$last_act" +%s 2>/dev/null || echo "$now_sec")
-      if (((now_sec - act_sec) < 120)); then
-        die "target member '$target' is currently busy (status: working). Wait or select an idle member."
-      fi
-    fi
-  fi
+  # The reservation is authoritative; telemetry is only another busy guard.
+  local target_state="$HIVE_ROOT/members/$target/state/delegation.json" task_id request_id
+  exec 7>>"$HIVE_ROOT/members/$target/state/.assignment.lock"
+  flock -w 2 7 || die "target assignment lock busy; retry later"
+  [[ ! -f $target_state ]] || die "target '$target' already has an active assignment (retry/cancel it explicitly)"
+  [[ $(jq -r '.status // empty' "$HIVE_ROOT/telemetry/members/$target.json" 2>/dev/null || true) != working ]] ||
+    die "target member '$target' is currently busy (explicit working state; Stop not observed)"
+  task_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  request_id="$task_id-request"
 
   # Claims validation and transfer
   local res d other owner
@@ -444,6 +439,32 @@ cmd_delegate() {
       [[ $owner == "$m" || $owner == "$target" ]] || die "claim collision: '$res' is held by $owner"
     fi
   done
+  # Record delegation metadata
+  mkdir -p "$HIVE_ROOT/members/$target/state"
+  local claims_json
+  claims_json=$(jq -n '$ARGS.positional' --args "${claims[@]}")
+  jq -n \
+    --arg task_id "$task_id" --arg request_id "$request_id" \
+    --arg channel "$(HIVE_MEMBER="$m" python3 "$MESSAGE_HELPER" route)" \
+    --arg parent "$m" \
+    --arg target "$target" \
+    --arg task "$task" \
+    --arg wt "$worktree" \
+    --arg br "$branch" \
+    --argjson claims "$claims_json" \
+    --arg now "$(now)" \
+    '{
+      task_id: $task_id, request_id: $request_id, channel: $channel, delivery_status: "queued",
+      parent_member: $parent,
+      target_member: $target,
+      task: $task,
+      worktree: (if $wt == "" then null else $wt end),
+      branch: (if $br == "" then null else $br end),
+      claims: $claims,
+      delegated_at: $now,
+      depth: 1
+    }' | python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$target_state"
+
   for res in "${claims[@]}"; do
     d=$(claim_dir "$res")
     if [[ ! -d $d ]]; then
@@ -453,79 +474,127 @@ cmd_delegate() {
     printf '%s\n' "$target" >"$d/owner"
     now >"$d/created-at"
   done
+
   flock -u 9
+  exec 9>&-
 
-  # Record delegation metadata
-  mkdir -p "$HIVE_ROOT/members/$target/state"
-  local target_state="$HIVE_ROOT/members/$target/state/delegation.json"
-  local claims_json
-  claims_json=$(jq -n '$ARGS.positional' --args "${claims[@]}")
-  jq -n \
-    --arg parent "$m" \
-    --arg target "$target" \
-    --arg task "$task" \
-    --arg wt "$worktree" \
-    --arg br "$branch" \
-    --argjson claims "$claims_json" \
-    --arg now "$(now)" \
-    '{
-      parent_member: $parent,
-      target_member: $target,
-      task: $task,
-      worktree: (if $wt == "" then null else $wt end),
-      branch: (if $br == "" then null else $br end),
-      claims: $claims,
-      delegated_at: $now,
-      depth: 1
-    }' >"$target_state"
 
-  # Announce in ROOM.md
-  local room_msg="DELEGATE -> $target: $task"
-  [[ -n $worktree ]] && room_msg="$room_msg | worktree: $worktree"
-  [[ -n $branch ]] && room_msg="$room_msg | branch: $branch"
-  ((${#claims[@]})) && room_msg="$room_msg | claims: ${claims[*]}"
-  cmd_say --room-only "$room_msg" >/dev/null
+  # Reserve and persist before notifying. The same ID is used on every retry.
+  flock -u 7
+  exec 7>&-
+  delegate_notify "$target_state"
+  echo "hive: reserved task $task_id for $target (depth: 1)"
+}
 
-  # Deliver through the session lifecycle, including a prompt on a cold wake.
-  local prompt="Delegated task from $m: $task"
-  [[ -n $worktree ]] && prompt="$prompt (worktree: $worktree)"
-  [[ -n $branch ]] && prompt="$prompt (branch: $branch)"
+delegate_notify() {
+  local record="$1" target parent task_id request_id body report status saved resource directory
+  target=$(jq -r .target_member "$record"); parent=$(jq -r .parent_member "$record")
+  task_id=$(jq -r .task_id "$record"); request_id=$(jq -r .request_id "$record")
+  while IFS= read -r resource; do
+    directory=$(claim_dir "$resource")
+    [[ $(cat "$directory/owner" 2>/dev/null || true) == "$target" ]] ||
+      die "reservation $task_id retained, but claim $resource is not ready; repair claims before retrying"
+  done < <(jq -r '.claims[]?' "$record")
+  body=$(jq -r '"DELEGATE -> \(.target_member): \(.task)" +
+    (if .worktree then " | worktree: " + .worktree else "" end) +
+    (if .branch then " | branch: " + .branch else "" end)' "$record")
+  # Post is durable before any wake attempt. A failed/unconfirmed adapter
+  # leaves the reservation and message pending, with an explicit retry path.
+  if ! HIVE_MEMBER="$parent" python3 "$MESSAGE_HELPER" post --json --room-only --channel dm --kind request \
+      --id "$request_id" --task-id "$task_id" --to "$target" -- "$body" >/dev/null; then
+    die "assignment $task_id retained; request persistence failed; use hive delegate retry $target"
+  fi
+  report=$(python3 "$MESSAGE_HELPER" dispatch "$request_id") || die "assignment $task_id retained; notification failed; use hive delegate retry $target"
+  status=sent
+  [[ $(jq '.queued | length' <<<"$report") == 0 ]] || status=queued
+  [[ $(jq '.failed | length' <<<"$report") == 0 ]] || status=failed
+  [[ $(jq '.unconfirmed | length' <<<"$report") == 0 ]] || status=unconfirmed
+  exec 7>>"$HIVE_ROOT/members/$target/state/.assignment.lock"
+  flock -w 2 7 || die "notification attempted; reservation status lock busy"
+  # Completion may have raced with submission; never recreate an active task.
+  saved="$HIVE_ROOT/members/$target/state/delegation.json"
+  if [[ -f $saved && $(jq -r .task_id "$saved") == "$task_id" ]]; then
+    jq --arg status "$status" --argjson report "$report" '.delivery_status=$status | .delivery_report=$report' "$saved" |
+      python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$saved"
+  fi
+  flock -u 7
+  exec 7>&-
+  if [[ $status == failed || $status == unconfirmed ]]; then
+    printf 'hive: task %s retained; delivery %s; inspect before retry: hive delegate retry %s\n' "$task_id" "$status" "$target" >&2
+    return 1
+  fi
+}
 
-  "$HIVE_MEMBER_BIN" send "$target" "$prompt" || die "delegation recorded, but delivery to $target failed"
-
-  echo "hive: delegated task to $target (depth: 1)"
+cmd_delegate_manage() {
+  require_init
+  local action="$1" target="${2:-}" m record parent request_id task_id
+  m=$(require_member)
+  target=$(python3 "$MEMBER_HELPER" resolve "$target") || exit 1
+  record="$HIVE_ROOT/members/$target/state/delegation.json"
+  exec 7>>"$HIVE_ROOT/members/$target/state/.assignment.lock"
+  flock -w 2 7 || die "assignment lock busy"
+  [[ -f $record ]] || die "no active assignment for $target"
+  parent=$(jq -r .parent_member "$record")
+  [[ $m == "$parent" || $m == "$target" ]] || is_beekeeper "$m" || die "only the requester, assignee or owner can $action this assignment"
+  if [[ $action == retry ]]; then
+    flock -u 7; exec 7>&-
+    delegate_notify "$record"
+    return
+  fi
+  request_id=$(jq -r .request_id "$record");task_id=$(jq -r .task_id "$record")
+  # Requester identity is already recorded; cancellations do not invent a new
+  # request. Keep claims until the assignee safely stops and reports completion.
+  HIVE_MEMBER="$m" python3 "$MESSAGE_HELPER" post --room-only --channel dm --kind decision --priority urgent \
+    --id "$task_id-cancel" --task-id "$task_id" --reply-to "$request_id" --resolution cancel \
+    --to "$target" -- "Assignment canceled; stop safely: $task_id" >/dev/null
+  jq '.cancel_requested=true' "$record" | python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$record"
+  flock -u 7; exec 7>&-
+  python3 "$MESSAGE_HELPER" dispatch "$task_id-cancel"
 }
 
 cmd_delegate_done() {
   require_init
-  local m
-  m=$(require_member)
-  local target_state="$(nest_dir "$m")/state/delegation.json"
-  [[ -f $target_state ]] || die "no active delegation record found for member '$m'"
-
-  local summary="${1:-subtask complete}"
-  local parent
-  parent=$(jq -r '.parent_member // "peer"' "$target_state" 2>/dev/null || echo "peer")
-
-  # Release claims recorded in delegation.json if still held by this member
-  local r d delegated_claims=()
-  mapfile -t delegated_claims < <(jq -r '.claims[]? // empty' "$target_state" 2>/dev/null)
-  exec 9>>"$HIVE_ROOT/.claims.lock"
-  flock 9
-  for r in "${delegated_claims[@]}"; do
-    d=$(claim_dir "$r")
-    if [[ -d $d && $(cat "$d/owner" 2>/dev/null || true) == "$m" ]]; then
-      rm -f "$d"/{owner,resource,created-at}
-      rmdir "$d" 2>/dev/null || true
-    fi
-  done
-  flock -u 9
-
-  # Archive delegation state
-  mv -f "$target_state" "$(nest_dir "$m")/state/delegation.done.json"
-
-  # Post DONE to Room
-  cmd_say --room-only "DONE (delegated by $parent): $summary"
+  local m; m=$(require_member)
+  local target_state="$(nest_dir "$m")/state/delegation.json" done_state="$(nest_dir "$m")/state/delegation.done.json"
+  local summary="${*:-subtask complete}" parent task_id request_id result_id r d claims=() report
+  exec 7>>"$(nest_dir "$m")/state/.assignment.lock"
+  flock -w 2 7 || die "assignment lock busy"
+  if [[ -f $target_state ]]; then
+    parent=$(jq -r .parent_member "$target_state")
+    task_id=$(jq -r .task_id "$target_state");request_id=$(jq -r .request_id "$target_state")
+    result_id="$task_id-result"
+    mapfile -t claims < <(jq -r '.claims[]?' "$target_state")
+    exec 9>>"$HIVE_ROOT/.claims.lock"
+    flock 9
+    for r in "${claims[@]}"; do
+      d=$(claim_dir "$r")
+      if [[ -d $d && $(cat "$d/owner" 2>/dev/null || true) == "$m" ]]; then
+        rm -f "$d"/{owner,resource,created-at}; rmdir "$d" 2>/dev/null || true
+      fi
+    done
+    flock -u 9; exec 9>&-
+    jq --arg summary "$summary" --arg result_id "$result_id" --arg now "$(now)" \
+      '.summary=$summary | .result_id=$result_id | .completed_at=$now | .status="completed"' "$target_state" |
+      python3 "${MEMBER_HELPER%/*}/hive_runtime.py" atomic-json "$done_state"
+    mkdir -p "$(nest_dir "$m")/state/tasks"
+    cp "$done_state" "$(nest_dir "$m")/state/tasks/$task_id.json"
+    rm -f "$target_state"
+  else
+    [[ -f $done_state ]] || die "no delegation record for $m"
+    # Recovery after an interrupted completion reuses persisted summary and ID.
+    parent=$(jq -r .parent_member "$done_state");task_id=$(jq -r .task_id "$done_state")
+    request_id=$(jq -r .request_id "$done_state");result_id=$(jq -r .result_id "$done_state")
+    summary=$(jq -r .summary "$done_state")
+  fi
+  HIVE_MEMBER="$m" python3 "$MESSAGE_HELPER" post --json --room-only --channel dm --kind result \
+    --id "$result_id" --task-id "$task_id" --reply-to "$request_id" --to "$parent" \
+    -- "DONE (delegated by $parent): $summary" >/dev/null ||
+    die "completion $task_id saved; result remains pending; repeat hive delegate done"
+  flock -u 7; exec 7>&-
+  report=$(python3 "$MESSAGE_HELPER" dispatch "$result_id") || die "completion saved; result notification pending"
+  echo "$report"
+  [[ $(jq '.failed | length' <<<"$report") == 0 && $(jq '.unconfirmed | length' <<<"$report") == 0 ]] ||
+    die "completion $task_id saved; requester notification pending; inspect before repeating hive delegate done"
 }
 
 main() {

@@ -96,7 +96,7 @@ cmd_status() {
     [[ -z ${1:-} || $m == "$1" ]] || continue
     [[ $name == "$m" ]] || name="$name ($m)"
     [[ -z $team ]] || name="$name @$team"
-    printf '%-24s %-24s %-7s %s\n' "$name" "$(state "$m")" "$(tele "$m" .harness || true)" "$(tele "$m" .session_id)"
+    printf '%-24s %-24s %-7s %s\n' "$name" "$(state "$m")" "$(tele "$m" .harness || true)" "$(tele "$m" .session_id) telemetry:$(python3 "${MEMBER_HELPER%/*}/hive_runtime.py" freshness "$HIVE_ROOT/telemetry/members/$m.json")"
   done < <(python3 "$MEMBER_HELPER" list | jq -r '.members[] | [.member, .name, (.team // "")] | @tsv')
 }
 

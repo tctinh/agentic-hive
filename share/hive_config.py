@@ -101,6 +101,11 @@ def update(path, desired, remove=False):
                 if previous and os.geteuid() == 0:
                     os.fchown(stream.fileno(), previous.st_uid, previous.st_gid)
             os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

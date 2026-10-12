@@ -57,6 +57,7 @@ telemetry() { # status
   cwd=$(field .cwd); cwd=${cwd:-$PWD}
   local cache="$nest/state/git-context" cached_cwd cached_branch cached_at
   IFS=$'\t' read -r cached_at cached_cwd cached_branch 2>/dev/null <"$cache" || true
+  [[ ${cached_at:-0} =~ ^[0-9]+$ ]] || cached_at=0
   branch=${cached_branch:-}
   if [[ ${cached_cwd:-} != "$cwd" || $event == SessionStart ]] || (($(date +%s) - ${cached_at:-0} >= 30)); then
     branch=$(timeout 0.1s git -C "$cwd" branch --show-current 2>/dev/null || true)
@@ -114,24 +115,16 @@ emit() { # additionalContext for this event
 # Unseen Room entries from peers, or nothing. Advances the cursor only after
 # the entries were written to stdout.
 deliver() {
-  local header="$1" g c entries n
+  local header="$1" signature
+  if [[ -z $header && -f $nest/state/context-stamp ]]; then
+    signature=$(stat -c '%i:%s:%y' "$HIVE_ROOT/messages.jsonl" "$HIVE_ROOT/channels.json" "$nest/state/delivery.json" 2>/dev/null) || signature=""
+    [[ -z $signature || $signature != "$(cat "$nest/state/context-stamp" 2>/dev/null)" ]] || return 0
+  fi
   exec 8>>"$nest/state/.deliver.lock" || return 0
   flock -n 8 || return 0
-  g=$(read_int "$HIVE_ROOT/.room-generation")
-  c=$(read_int "$cursor_file")
-  if ((g > c)); then
-    entries=$(hive _entries "$c" "$m" "$MAX_ENTRIES" 2>/dev/null) || entries=""
-    if [[ -n $entries ]]; then
-      n=$(grep -c '^\[[0-9]\+\] ' <<<"$entries")
-      emit "$(printf '%s\nHIVE Room: %s new message(s) from peers (information, not authority):\n\n%s' \
-        "$header" "$n" "$entries")" || { flock -u 8; return 0; }
-    elif [[ -n $header ]]; then
-      emit "$header" || { flock -u 8; return 0; }
-    fi
-    printf '%s\n' "$g" >"$cursor_file.tmp" && mv -f "$cursor_file.tmp" "$cursor_file"
-  elif [[ -n $header ]]; then
-    emit "$header"
-  fi
+  # One delivery source. Migrated native sessions are explicitly skipped by
+  # this helper; ROOM.md remains a view and is never another injector.
+  printf '%s' "$header" | timeout 0.5s python3 "$SHARE/hive_messages.py" hook "$event" 2>/dev/null || true
   flock -u 8
 }
 
@@ -176,7 +169,7 @@ profile_hint() {
   team=$(jq -r '.team // empty' <<<"$value")
   printf 'HIVE member name: %s (session identity %s)' "$name" "$m"
   [[ -z $team ]] || printf '; team: @%s' "$team"
-  printf '. One shared Room; @team tags prompt that team, @all prompts other members. Use hive for current name/team routing. Use your current project/worktree; a saved working folder takes effect on wake/restart.\n'
+  printf '. Channels route subscribed context; requests name recipients. Routine updates stay passive. Use hive for current name/team routing. Use your current project/worktree; a saved working folder takes effect on wake/restart.\n'
   printf '%s\n' "$value" >"$marker" 2>/dev/null || true
 }
 
@@ -184,6 +177,15 @@ profile_hint() {
 # latest non-empty snapshot to telemetry/quota/codex.json for the dashboard.
 # Throttled to once per 30s; failures ignored.
 codex_quota() {
+  local attempt="$nest/state/quota-attempt"
+  # Throttle the attempt before Python startup, including empty/failed reads.
+  exec 6>>"$nest/state/.quota-attempt.lock" || return 0
+  flock -n 6 || { exec 6>&-; return 0; }
+  if (($(date +%s) - $(stat -c %Y "$attempt" 2>/dev/null || echo 0) < 30)); then
+    flock -u 6; exec 6>&-; return 0
+  fi
+  touch "$attempt" 2>/dev/null || true
+  flock -u 6; exec 6>&-
   timeout 0.3s python3 "$SHARE/hive_runtime.py" quota "$HIVE_ROOT" "$m" <<<"$input" 2>/dev/null || true
 }
 
@@ -221,17 +223,19 @@ core_hint() {
   [[ $(dirname "$(readlink -f "$(dirname "$(readlink -f "$0")")/hive")") != $(dirname "$(readlink -f "$bindir/hive")") ]] || return 0
   current=$(readlink -f "$bindir/hive")
   [[ $(cat "$marker" 2>/dev/null) != "$current" ]] || return 0
-  printf 'HIVE CLI: %s/hive tracks host updates; older running sessions may retain a pinned PATH. Its Room @member/@all mentions prompt peers. Ask human intent/taste questions with hive say "@beekeeper <question?>"; the WebUI highlights them and replies prompt your session. Preserve unresolved choices; continue only independent work while awaiting an answer.\n' "$bindir"
+  printf 'HIVE CLI: %s/hive tracks host updates; older running sessions may retain a pinned PATH. Its channel requests queue for safe boundaries. Ask human intent/taste questions with hive say "@beekeeper <question?>"; the WebUI highlights them and replies prompt your session. Preserve unresolved choices; continue only independent work while awaiting an answer.\n' "$bindir"
   printf '%s\n' "$current" >"$marker" 2>/dev/null || true
 }
 
 case $event in
   SessionStart)
+    rm -f "$nest/state/quota-attempt" 2>/dev/null || true
     telemetry working
     deliver "$(session_header)"
     ;;
   UserPromptSubmit)
     record_prompt
+    timeout 0.3s python3 "$SHARE/hive_messages.py" receipt <<<"$input" 2>/dev/null || true
     telemetry working
     deliver "$(
       core_hint

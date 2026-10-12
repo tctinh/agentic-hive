@@ -28,6 +28,7 @@ install_codex_hooks() {
     echo "hive-launch: hive-hook not found; Codex runs without Room awareness" >&2
     return 0
   }
+  hook=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$hook")
   want=$(jq -n --arg h "$hook" '
     def on($e): [{hooks: [{type: "command", command: "\($h) codex \($e)"}]}];
     {hooks: {

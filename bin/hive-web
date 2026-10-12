@@ -504,7 +504,11 @@ def room(limit=ROOM_ENTRIES):
             if cur["ts"] is None and line.startswith("## "):
                 cur["ts"] = line[3:].split(" — ", 1)[0]
             else:
-                cur["body"].append(line)
+                metadata = re.fullmatch(r"<!-- hive:message id=([^ ]+) channel=([^ ]+) -->", line)
+                if metadata and "id" not in cur:
+                    cur["id"], cur["channel"] = metadata.groups()
+                else:
+                    cur["body"].append(line)
     for e in entries:
         body = "\n".join(e["body"]).strip()
         body = re.sub(r"\n*Generation: %d\s*$" % e["gen"], "", body).strip()
@@ -881,10 +885,10 @@ class Handler(BaseHTTPRequestHandler):
                     member = req.get("member")
                     if not isinstance(member, str) or not MEMBER_RE.fullmatch(member) or is_beekeeper(member):
                         raise ValueError("known agent member required")
-                    for key in ("name", "team", "workdir"):
+                    for key in ("name", "team", "workdir", "project"):
                         if key in req and not isinstance(req[key], str):
                             raise ValueError(f"{key} must be text")
-                    profile = hive_members.update(HIVE_ROOT, member, name=req.get("name"), team=req.get("team"), workdir=req.get("workdir"))
+                    profile = hive_members.update(HIVE_ROOT, member, name=req.get("name"), team=req.get("team"), workdir=req.get("workdir"), project=req.get("project"))
                     self._send(200, json.dumps({"ok": True, "profile": profile}), "application/json")
                     return
                 if self.path == "/api/identity":

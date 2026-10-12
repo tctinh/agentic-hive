@@ -4,6 +4,8 @@ set -euo pipefail
 repo=$(readlink -f "$(dirname "$0")/..")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+export HOME="$tmp/home" CODEX_HOME="$tmp/codex"
+mkdir -p "$HOME" "$CODEX_HOME"
 export HIVE_ROOT="$tmp/hive" HIVE_USER="$(id -un)" HIVE_TEST_LOG="$tmp/log"
 export HIVE_TEST_AGENT_PID=$$
 export HIVE_MEMBER=bob
@@ -177,7 +179,7 @@ EOF
 chmod +x "$tmp/bin/claude" "$tmp/bin/codex"
 printf 'member instruction\n' >"$tmp/share/member-instruction.md"
 HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run claude 'first task' </dev/null >/dev/null
-HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run codex 'first task' </dev/null >/dev/null
+HIVE_SHARE="$repo/share" "$repo/bin/hive-launch" --run codex 'first task' </dev/null >/dev/null
 rg -q '^claude --permission-mode auto .*first task$' "$HIVE_TEST_LOG"
 rg -q '^codex --approve-for-me --add-dir '"$HIVE_ROOT"' .*first task$' "$HIVE_TEST_LOG"
 printf 'autonomous launch flags applied\n'

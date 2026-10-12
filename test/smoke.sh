@@ -137,7 +137,8 @@ check "statusline outside hive is model only" test "$(HIVE_MEMBER= hive-statusli
 mkdir -p "$HIVE_ROOT/cx/sessions/2026/09/30"
 printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1790800000},"secondary":{"used_percent":64,"window_minutes":10080,"resets_at":1791200000},"plan_type":"plus"}}}' \
   >"$HIVE_ROOT/cx/sessions/2026/09/30/rollout-x.jsonl"
-CODEX_HOME="$HIVE_ROOT/cx" HIVE_MEMBER=bob hive-hook codex Stop <<<'{"cwd":"/tmp"}' >/dev/null
+rm -f "$HIVE_ROOT/members/bob/state/quota-cache.json"
+CODEX_HOME="$HIVE_ROOT/cx" HIVE_MEMBER=bob hive-hook codex Stop <<<"{\"cwd\":\"/tmp\",\"transcript_path\":\"$HIVE_ROOT/cx/sessions/2026/09/30/rollout-x.jsonl\"}" >/dev/null
 check "codex quota recorded" test "$(jq -r '[.windows[] | "\(.name)=\(.used_percent)"] | join(",")' "$HIVE_ROOT/telemetry/quota/codex.json")" = "5h=12.5,week=64"
 check "dashboard shows quota" grep -q 'QUOTA codex: 5h 12% · week 64%' <(hive-dash --once)
 

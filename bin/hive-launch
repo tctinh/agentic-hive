@@ -23,7 +23,7 @@ fi
 # CLI directory so the file (and Codex's trust hash for it) stays stable across
 # host updates; fall back to whatever hive-hook is on PATH.
 install_codex_hooks() {
-  local hook="${HIVE_BIN_DIR:+${HIVE_BIN_DIR}/hive-hook}" f="$HOME/.codex/hooks.json" want
+  local hook="${HIVE_BIN_DIR:+${HIVE_BIN_DIR}/hive-hook}" f="${CODEX_HOME:-$HOME/.codex}/hooks.json" want
   [[ -n $hook && -x $hook ]] || hook=$(command -v hive-hook) || {
     echo "hive-launch: hive-hook not found; Codex runs without Room awareness" >&2
     return 0
@@ -37,8 +37,7 @@ install_codex_hooks() {
       Stop: on("Stop"),
       SessionEnd: on("SessionEnd")
     }}')
-  mkdir -p "$HOME/.codex"
-  [[ -f $f && $(cat "$f") == "$want" ]] || printf '%s\n' "$want" >"$f"
+  python3 "$SHARE/hive_config.py" merge "$f" <<<"$want" || die "could not preserve Codex hook configuration"
 }
 
 # Inner mode: runs inside the tmux pane.
@@ -89,8 +88,7 @@ session="hive-$member"
 
 if ! tmux has-session -t "=$session" 2>/dev/null; then
   # Launch record: lets hive-member wake the member in the same place.
-  jq -n --arg h "$harness" --arg d "$dir" --arg now "$(date --iso-8601=seconds)" \
-    '{harness: $h, dir: $d, launched_at: $now}' >"$HIVE_ROOT/members/$member/state/launch.json"
+  python3 "$SHARE/hive_runtime.py" save-launch "$HIVE_ROOT/members/$member/state/launch.json" "$harness" "$dir" "$@"
   tmux new-session -d -s "$session" -c "$dir" \
     -e "HIVE_MEMBER=$member" \
     -e "HIVE_ROOT=$HIVE_ROOT" \

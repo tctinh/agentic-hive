@@ -109,7 +109,7 @@ TMUX_CONF=/etc/tmux.conf.d/agentic-hive.conf
 HOOKS=/etc/claude-code/managed-settings.json
 
 BIN_FILES=(hive hive-hook hive-launch hive-dash hive-web hive-attach hive-statusline hive-member hive-session)
-SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py hive_devlogs.py)
+SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py hive_devlogs.py hive_runtime.py)
 
 # Assets ship next to this script in the repo (install/ sits beside bin/ and share/).
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -283,7 +283,9 @@ install_sudoers() {
 $BEEKEEPER ALL=($HIVE_USER) NOPASSWD: ALL
 EOF
   if (( DRY_RUN )); then return 0; fi
-  command -v visudo >/dev/null 2>&1 && { visudo -cf "$f" >/dev/null || die "invalid sudoers file: $f"; }
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$f" >/dev/null || die "invalid sudoers file: $f"
+  fi
 }
 
 # --- login profile ----------------------------------------------------------

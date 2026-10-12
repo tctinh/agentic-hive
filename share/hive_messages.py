@@ -59,6 +59,12 @@ def registry(root):
         Path(root) / "channels.json",
         {
             "channels": {
+                "legacy": {
+                    "purpose": "Unscoped historical Room; deliberate reads only",
+                    "lead": "beekeeper",
+                    "archived": True,
+                    "pins": [],
+                },
                 "hive": {
                     "purpose": "Infrastructure and owner direction",
                     "lead": "beekeeper",
@@ -289,7 +295,6 @@ def cache_if_caught_up(root, member, rows, value, signature):
             text=True,
         )
         if signature == context_signature(root):
-            atomic(path / "context-signature.json", signature)
             temporary = path / "context-stamp.tmp"
             temporary.write_text(stamp)
             os.replace(temporary, path / "context-stamp")
@@ -638,8 +643,6 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
     if adapter(root, member) != "hooks":
         return None
     path = nest(root, member)
-    if not header and load(path / "context-signature.json", []) == context_signature(root):
-        return None
     with locked(path / ".message-state.lock", wait=0.05):
         signature = context_signature(root)
         rows = records(root)

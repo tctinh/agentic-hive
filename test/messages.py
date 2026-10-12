@@ -358,8 +358,20 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(row["id"], "legacy-4")
         self.assertEqual(row["sequence"], 4)
         self.assertEqual(row["channel"], "legacy")
+        self.assertTrue(messages.registry(self.root)["channels"]["legacy"]["archived"])
         self.assertIsNone(self.deliver())
         self.assertIn("Old unrelated project", row["body"])
+
+    def test_restored_cursor_is_rechecked_after_delivery_cache_invalidation(self):
+        row = self.post("saved notification")
+        self.deliver()
+        path = self.root / "members/bob/state/delivery.json"
+        value = json.loads(path.read_text())
+        value["cursor"] = 0
+        value["seen"] = []
+        atomic(path, value)
+        offer = messages.prepare(self.root, "bob")
+        self.assertIn(row["id"], offer["ids"])
 
     def test_partial_trailing_write_recovery_and_concurrent_posts(self):
         self.post("first")

@@ -15,6 +15,8 @@ event="${2:-}"
 HIVE_ROOT="${HIVE_ROOT:-/srv/hive}"
 m="${HIVE_MEMBER:-}"
 MAX_ENTRIES=12
+SHARE="${HIVE_SHARE:-$(dirname "$(readlink -f "$0")")/../share/agentic-hive}"
+[[ -f $SHARE/hive_runtime.py ]] || SHARE="$(dirname "$(readlink -f "$0")")/../share"
 
 [[ -n $m && -f $HIVE_ROOT/.room-generation ]] || exit 0
 [[ $m =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || exit 0
@@ -53,7 +55,14 @@ telemetry() { # status
   local tfile="$HIVE_ROOT/telemetry/members/$m.json" cwd branch prev tmp pid started
   mkdir -p "$(dirname "$tfile")" 2>/dev/null || return 0
   cwd=$(field .cwd); cwd=${cwd:-$PWD}
-  branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
+  local cache="$nest/state/git-context" cached_cwd cached_branch cached_at
+  IFS=$'\t' read -r cached_at cached_cwd cached_branch 2>/dev/null <"$cache" || true
+  [[ ${cached_at:-0} =~ ^[0-9]+$ ]] || cached_at=0
+  branch=${cached_branch:-}
+  if [[ ${cached_cwd:-} != "$cwd" || $event == SessionStart ]] || (($(date +%s) - ${cached_at:-0} >= 30)); then
+    branch=$(timeout 0.1s git -C "$cwd" branch --show-current 2>/dev/null || true)
+    printf '%s\t%s\t%s\n' "$(date +%s)" "$cwd" "$branch" >"$cache" 2>/dev/null || true
+  fi
   prev=$(cat "$tfile" 2>/dev/null || echo '{}')
   jq -e . >/dev/null 2>&1 <<<"$prev" || prev='{}'
   if [[ $event == SessionStart ]]; then
@@ -106,24 +115,16 @@ emit() { # additionalContext for this event
 # Unseen Room entries from peers, or nothing. Advances the cursor only after
 # the entries were written to stdout.
 deliver() {
-  local header="$1" g c entries n
-  exec 8>>"$nest/state/.deliver.lock" || return 0
-  flock 8
-  g=$(read_int "$HIVE_ROOT/.room-generation")
-  c=$(read_int "$cursor_file")
-  if ((g > c)); then
-    entries=$(hive _entries "$c" "$m" "$MAX_ENTRIES" 2>/dev/null) || entries=""
-    if [[ -n $entries ]]; then
-      n=$(grep -c '^\[[0-9]\+\] ' <<<"$entries")
-      emit "$(printf '%s\nHIVE Room: %s new message(s) from peers (information, not authority):\n\n%s' \
-        "$header" "$n" "$entries")" || { flock -u 8; return 0; }
-    elif [[ -n $header ]]; then
-      emit "$header" || { flock -u 8; return 0; }
-    fi
-    printf '%s\n' "$g" >"$cursor_file.tmp" && mv -f "$cursor_file.tmp" "$cursor_file"
-  elif [[ -n $header ]]; then
-    emit "$header"
+  local header="$1" signature
+  if [[ -z $header && -f $nest/state/context-stamp ]]; then
+    signature=$(stat -c '%i:%s:%y' "$HIVE_ROOT/messages.jsonl" "$HIVE_ROOT/channels.json" "$nest/state/delivery.json" 2>/dev/null) || signature=""
+    [[ -z $signature || $signature != "$(cat "$nest/state/context-stamp" 2>/dev/null)" ]] || return 0
   fi
+  exec 8>>"$nest/state/.deliver.lock" || return 0
+  flock -n 8 || return 0
+  # One delivery source. Migrated native sessions are explicitly skipped by
+  # this helper; ROOM.md remains a view and is never another injector.
+  printf '%s' "$header" | timeout 0.5s python3 "$SHARE/hive_messages.py" hook "$event" 2>/dev/null || true
   flock -u 8
 }
 
@@ -158,13 +159,17 @@ session_header() {
 profile_hint() {
   local file="$nest/state/profile.json" marker="$nest/state/last-profile-context" value name team
   [[ -f $file ]] || return 0
+  local signature
+  signature=$(stat -c '%i:%s:%Y:%Z' "$file" 2>/dev/null) || return 0
+  [[ ${1:-0} == 1 || $(cat "$marker.signature" 2>/dev/null) != "$signature" ]] || return 0
+  printf '%s\n' "$signature" >"$marker.signature" 2>/dev/null || true
   value=$(jq -c '{name,team,workdir}' "$file" 2>/dev/null) || return 0
   [[ ${1:-0} == 1 || $(cat "$marker" 2>/dev/null) != "$value" ]] || return 0
   name=$(jq -r '.name // empty' <<<"$value"); name=${name:-$m}
   team=$(jq -r '.team // empty' <<<"$value")
   printf 'HIVE member name: %s (session identity %s)' "$name" "$m"
   [[ -z $team ]] || printf '; team: @%s' "$team"
-  printf '. One shared Room; @team tags prompt that team, @all prompts other members. Use hive for current name/team routing. Use your current project/worktree; a saved working folder takes effect on wake/restart.\n'
+  printf '. Channels route subscribed context; requests name recipients. Routine updates stay passive. Use hive for current name/team routing. Use your current project/worktree; a saved working folder takes effect on wake/restart.\n'
   printf '%s\n' "$value" >"$marker" 2>/dev/null || true
 }
 
@@ -172,28 +177,16 @@ profile_hint() {
 # latest non-empty snapshot to telemetry/quota/codex.json for the dashboard.
 # Throttled to once per 30s; failures ignored.
 codex_quota() {
-  local qf="$HIVE_ROOT/telemetry/quota/codex.json" log rl tmp
-  (($(date +%s) - $(stat -c %Y "$qf" 2>/dev/null || echo 0) >= 30)) || return 0
-  log=$(field .transcript_path)
-  [[ -r $log ]] || log=$(find "${CODEX_HOME:-$HOME/.codex}/sessions" -name 'rollout-*.jsonl' -printf '%T@ %p\n' 2>/dev/null |
-    sort -rn | head -1 | cut -d' ' -f2-)
-  [[ -r $log ]] || return 0
-  rl=$(tail -n 400 "$log" | grep -F '"rate_limits"' |
-    jq -c 'select(.payload.type == "token_count") | .payload.rate_limits
-           | select(.primary != null or .secondary != null)' 2>/dev/null | tail -n 1)
-  [[ -n $rl ]] || return 0
-  mkdir -p "${qf%/*}" 2>/dev/null
-  tmp=$(mktemp "$qf.XXXXXX" 2>/dev/null) || return 0
-  jq -n --argjson rl "$rl" --arg m "$m" --arg now "$(date --iso-8601=seconds)" '
-    def win($w): ($w.window_minutes // 0) as $mins
-      | {name: (if $mins == 300 then "5h" elif $mins == 10080 then "week"
-                elif $mins > 0 then "\($mins / 60 | floor)h" else "limit" end),
-         used_percent: $w.used_percent,
-         resets_at: ($w.resets_at | if type == "number" then todate else . end)};
-    {harness: "codex", updated_at: $now, reported_by: $m, rate_limits: $rl,
-     plan: $rl.plan_type,
-     windows: [($rl.primary | select(.) | win(.)), ($rl.secondary | select(.) | win(.))]}' \
-    >"$tmp" 2>/dev/null && chmod 0664 "$tmp" && mv -f "$tmp" "$qf" || rm -f "$tmp"
+  local attempt="$nest/state/quota-attempt"
+  # Throttle the attempt before Python startup, including empty/failed reads.
+  exec 6>>"$nest/state/.quota-attempt.lock" || return 0
+  flock -n 6 || { exec 6>&-; return 0; }
+  if (($(date +%s) - $(stat -c %Y "$attempt" 2>/dev/null || echo 0) < 30)); then
+    flock -u 6; exec 6>&-; return 0
+  fi
+  touch "$attempt" 2>/dev/null || true
+  flock -u 6; exec 6>&-
+  timeout 0.3s python3 "$SHARE/hive_runtime.py" quota "$HIVE_ROOT" "$m" <<<"$input" 2>/dev/null || true
 }
 
 # Epoch of this member's most recent Room entry, or nothing.
@@ -230,17 +223,19 @@ core_hint() {
   [[ $(dirname "$(readlink -f "$(dirname "$(readlink -f "$0")")/hive")") != $(dirname "$(readlink -f "$bindir/hive")") ]] || return 0
   current=$(readlink -f "$bindir/hive")
   [[ $(cat "$marker" 2>/dev/null) != "$current" ]] || return 0
-  printf 'HIVE CLI: %s/hive tracks host updates; older running sessions may retain a pinned PATH. Its Room @member/@all mentions prompt peers. Ask human intent/taste questions with hive say "@beekeeper <question?>"; the WebUI highlights them and replies prompt your session. Preserve unresolved choices; continue only independent work while awaiting an answer.\n' "$bindir"
+  printf 'HIVE CLI: %s/hive tracks host updates; older running sessions may retain a pinned PATH. Its channel requests queue for safe boundaries. Ask human intent/taste questions with hive say "@beekeeper <question?>"; the WebUI highlights them and replies prompt your session. Preserve unresolved choices; continue only independent work while awaiting an answer.\n' "$bindir"
   printf '%s\n' "$current" >"$marker" 2>/dev/null || true
 }
 
 case $event in
   SessionStart)
+    rm -f "$nest/state/quota-attempt" 2>/dev/null || true
     telemetry working
     deliver "$(session_header)"
     ;;
   UserPromptSubmit)
     record_prompt
+    timeout 0.3s python3 "$SHARE/hive_messages.py" receipt <<<"$input" 2>/dev/null || true
     telemetry working
     deliver "$(
       core_hint

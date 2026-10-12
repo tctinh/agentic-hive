@@ -83,11 +83,7 @@ member_row() {
   if [[ -z $j || $j == '{}' ]]; then
     state=never
   elif [[ -n $pid && -d /proc/$pid ]] && [[ $(cat "/proc/$pid/comm" 2>/dev/null) == @($harness*|node*|.$harness*) ]]; then
-    if [[ $status == working && -n $last ]] && (($(date +%s) - $(date -d "$last" +%s) < 120)); then
-      state=working
-    else
-      state=idle
-    fi
+    case $status in working|idle) state=$status ;; *) state=unknown ;; esac
   else
     state=dead
   fi

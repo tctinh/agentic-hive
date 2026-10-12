@@ -65,15 +65,12 @@ process_alive() {
 }
 harness_alive() { has_session "$1" && process_alive "$1"; }
 
-working() { # active in the last 2 minutes
-  local last
-  [[ $(tele "$1" .status) == working ]] || return 1
-  last=$(tele "$1" .last_activity)
-  [[ -n $last ]] && (($(date +%s) - $(date -d "$last" +%s) < 120))
+working() { # explicit turn state survives long reasoning/tool gaps
+  [[ $(tele "$1" .status) == working ]]
 }
 
 state() {
-  if harness_alive "$1"; then working "$1" && echo working || echo idle
+  if harness_alive "$1"; then working "$1" && echo working || { [[ $(tele "$1" .status) == idle ]] && echo idle || echo unknown; }
   elif has_session "$1"; then echo "dead (tmux shell open)"
   elif [[ -f $HIVE_ROOT/telemetry/members/$1.json ]]; then echo dead
   else echo never; fi
@@ -99,14 +96,14 @@ cmd_status() {
     [[ -z ${1:-} || $m == "$1" ]] || continue
     [[ $name == "$m" ]] || name="$name ($m)"
     [[ -z $team ]] || name="$name @$team"
-    printf '%-24s %-24s %-7s %s\n' "$name" "$(state "$m")" "$(tele "$m" .harness || true)" "$(tele "$m" .session_id)"
+    printf '%-24s %-24s %-7s %s\n' "$name" "$(state "$m")" "$(tele "$m" .harness || true)" "$(tele "$m" .session_id) telemetry:$(python3 "${MEMBER_HELPER%/*}/hive_runtime.py" freshness "$HIVE_ROOT/telemetry/members/$m.json")"
   done < <(python3 "$MEMBER_HELPER" list | jq -r '.members[] | [.member, .name, (.team // "")] | @tsv')
 }
 
 cmd_kill() {
   local m="$1" force="$2"
   if working "$m" && harness_alive "$m" && ((!force)); then
-    die "$m is working right now (active <2m ago); use --force to kill anyway"
+    die "$m is working right now (explicit turn state; Stop not observed); use --force to kill anyway"
   fi
   if has_session "$m"; then
     tmux kill-session -t "=hive-$m"
@@ -249,10 +246,11 @@ cmd_wake() (
   [[ -d $dir ]] || die "directory $dir no longer exists"
   sid=$(tele "$m" .session_id)
 
+  mapfile -d '' -t args < <(python3 "${MEMBER_HELPER%/*}/hive_runtime.py" launch-args "$HIVE_ROOT/members/$m/state/launch.json")
   if ((!fresh)) && [[ -n $sid ]]; then
     case $harness in
-      claude) args=(--resume "$sid") ;;
-      codex) args=(resume "$sid") ;;
+      claude) args+=(--resume "$sid") ;;
+      codex) args+=(resume "$sid") ;;
     esac
     say "waking $m ($harness in $dir), resuming conversation $sid"
   else

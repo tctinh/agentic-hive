@@ -734,7 +734,7 @@ function renderMembers(all) {
       ${m.team ? `<button type="button" class="team-tag" data-team="${esc(m.team)}">@${esc(m.team)}</button>` : ''}
       <dl class="kv">
         <dt>harness</dt><dd>${esc(m.harness || "–")}</dd>
-        <dt>activity</dt><dd>${ago(m.last_activity)}${m.last_tool ? " · " + esc(m.last_tool) : ""}</dd>
+        <dt>activity</dt><dd>${ago(m.last_activity)}${m.telemetry_freshness === "unknown" ? " · telemetry unknown" : ""}${m.last_tool ? " · " + esc(m.last_tool) : ""}</dd>
         <dt>worktree</dt><dd>${esc(m.cwd_short || "–")}</dd>
         ${m.workdir && m.workdir!==m.cwd ? `<dt>next folder</dt><dd>${esc(m.workdir)}</dd>` : ''}
         <dt>branch</dt><dd>${esc(m.git_branch || "–")}</dd>

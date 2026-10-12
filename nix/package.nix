@@ -39,7 +39,9 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm755 -t $out/bin bin/hive bin/hive-hook bin/hive-launch bin/hive-dash bin/hive-web bin/hive-attach bin/hive-statusline bin/hive-member bin/hive-session
-    install -Dm644 -t $out/share/agentic-hive share/member-instruction.md share/dashboard.html share/xterm.js share/xterm.css share/hive_members.py share/hive_config.py share/hive_devlogs.py
+    install -Dm644 -t $out/share/agentic-hive share/member-instruction.md share/dashboard.html share/xterm.js share/xterm.css share/hive_members.py share/hive_config.py share/hive_devlogs.py share/hive_runtime.py share/hive_messages.py
+    install -Dm644 share/guidance/product-design.md $out/share/agentic-hive/guidance/product-design.md
+    install -Dm644 share/guidance/devlogs.md $out/share/agentic-hive/guidance/devlogs.md
     patchShebangs $out/bin
     for f in $out/bin/*; do
       wrapProgram "$f" \

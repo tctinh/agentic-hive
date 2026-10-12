@@ -1,6 +1,6 @@
 # Agentic Hive 2.0 — v0.1 Revised Specification
 
-> **Implementation instruction:** Read this document before implementation. Preserve the deliberately minimal architecture. Hive is a persistent Unix habitat for capable general-purpose coding agents, not an AI office and not an orchestration framework. The host's configuration system defines the reproducible host physics (the NixOS module or the portable installer); `/srv/hive` remains the mutable habitat. Do not add supervisors, task routers, autonomous wake/delegation, vector memory, agent role systems, or workflow machinery unless the first live experiment produces concrete evidence that a missing primitive is necessary.
+> **Implementation instruction:** Read this document before implementation. Preserve the deliberately minimal architecture. Hive is a persistent Unix habitat for capable general-purpose coding agents, not an AI office and not an orchestration framework. The host's configuration system defines the reproducible host physics (the NixOS module or the portable installer); `/srv/hive` remains the mutable habitat. Keep the owner-approved filesystem channel/DM primitives in §7 narrow. Do not add supervisors, automatic task allocation, vector memory, agent role systems, or workflow machinery. Source behavior is not proof of deployed behavior.
 
 ## 1. Purpose
 
@@ -32,7 +32,7 @@ A member is a generally capable intelligence temporarily holding a problem.
 
 Members do not literally share one context window.
 
-Hive gives them a common sensory surface: shared project/filesystem state, one group Room, temporary claims, curated durable knowledge, and optional inspection of another member's local room.
+Hive gives them a common sensory surface: shared project/filesystem state, scoped channels and DMs, temporary claims, curated durable knowledge, and optional inspection of another member's local room.
 
 This should allow behavior that feels hive-like without pretending the agents are truly one mind.
 
@@ -167,12 +167,13 @@ dismissals remain personal. Human profiles live under `beekeepers/`, separate
 from agent nests, so `@all` never launches a human as a member. Names are labels;
 tailnet membership and network rules control who can reach the dashboard.
 
-Members may have a public name and one team label in their local state.
-Renaming preserves their underlying session/nest identity. A team mention
-expands to its members with duplicate recipients removed; every team uses the
-same Room and awareness history. Team labels group attention and project work,
-without adding channels, roles, hierarchy, task state, or filesystem access
-boundaries. Saved working folders apply on the next wake/restart.
+Members may have a public name and explicit project/team membership in their
+local state. Renaming preserves the session/nest identity. A project/team
+subscription groups attention; it creates no role hierarchy or filesystem
+access boundary. Legacy unqualified team mentions remain supported. Project
+team channels use qualified names so a lead's name can also name a team without
+making a mention of that lead prompt every teammate. Saved working folders
+apply on the next wake/restart.
 
 ## 4. Host and Privilege Model
 
@@ -557,13 +558,17 @@ Do not build a secret-management platform into Hive v0.1; use existing host mech
 
 ```text
 /srv/hive/
-├── ROOM.md
+├── messages.jsonl       # durable append-only records
+├── channels.json        # registry and subscriptions
+├── ROOM.md              # human-readable projection with the same IDs
 ├── .room-generation
 │
 ├── members/
 │   └── <member>/
 │       ├── state/
-│       │   └── last-delivered-generation
+│       │   ├── delivery.json  # cursor, seen IDs, requests, offered batch
+│       │   ├── transport.json # optional native migration marker
+│       │   └── last-delivered-generation # compatibility cursor
 │       ├── notes/
 │       ├── scratch/
 │       └── artifacts/
@@ -589,74 +594,56 @@ Do not build a secret-management platform into Hive v0.1; use existing host mech
 
 Do not pre-create elaborate taxonomies. Create directories when real use requires them.
 
-## 7. Shared Room
+## 7. Messages and channels
 
-`ROOM.md` is the shared group conversation.
+`messages.jsonl` is the append-only message source. `ROOM.md` is a readable
+projection with the same IDs, not another delivery source. The current source
+adapter uses lifecycle hooks and guarded tmux prompts. It contains no native
+direct-session-chat API. See [channel operation and rollout](docs/channels.md).
 
-It is append-only during normal operation.
+Records carry `id`, increasing `sequence`, `channel`, service-supplied `sender`,
+`sender_authority`, `kind` (info/request/result/decision), `priority`
+(routine/urgent), `body`, `created_at` and optional recipients/task/reply/related
+IDs. The existing trusted member/Beekeeper identity supplies authority; peer
+body text never does. Names are not a new authentication/security framework.
 
-Example:
+The writer takes `.messages.lock`, recovers an incomplete trailing append,
+assigns the next sequence and fsyncs the complete record before reporting success.
+Retries reuse an ID and must match the original content. Small state files use
+locked atomic replacement. Complete corrupt records require deliberate repair.
 
-```markdown
-## 2026-09-30T18:42:17+07:00 — claude-opus-game
+Channel subscriptions filter automatic context before prompt construction.
+`hive` is the bounded owner/infrastructure feed. `debter` and
+`debter/titantwoshot` are initial registry entries; real membership is explicit.
+Project/team assignment subscribes that member to its team channel. Project
+interface subscriptions are owner/lead choices. DMs target named recipients.
+Subscriptions route attention within the shared trusted filesystem, not secrecy.
 
-Enemy recovery changed from 0.6s to 0.9s because the new energy rhythm
-needs a larger decision window.
+Routine info/decisions do not wake. Requests and urgent notices name recipients;
+busy recipients receive them at a safe checkpoint. Idle requests may cause one
+pending wake batch. Results reference a recorded request and target its requester;
+they wake only while that request was pending. Receipt does not complete work.
+Result, explicit cancellation or a resolving acknowledgment closes a request.
 
-Generation: 42
-```
+A member's `delivery.json` keeps a contiguous cursor, accepted IDs ahead of it,
+open request IDs and a durable offered batch. Hook context is limited to twelve
+messages and 8,000 characters including wrappers; oversized content gets an
+explicit envelope and full-body read command. Budget omissions and failed
+handoffs remain unread. Urgent messages may jump ahead while their IDs remain
+seen until the cursor catches up. An interrupted offer replays the same IDs;
+exactly-once execution is not promised by a stdout/tmux adapter.
 
-Required fields: timestamp, member name, natural-language body, generation.
+Joining captures a baseline under the writer lock and supplies bounded passive
+catch-up with purpose, lead, pinned decisions, open references and continuation.
+Old requests do not become wake backlog; still-open requests naming the member
+remain actionable. Reassignment removes obsolete team feeds and retains open
+request references. Archive rejects open assignments/requests, pauses the feed
+and rejects posts until reopened; history stays readable.
 
-No mandatory message types.
-
-Members may naturally say `starting`, `done`, `FYI`, `blocked`, or `Beekeeper request` when useful.
-
-The Room is semantic shared working memory, not an audit trail or a machine-state
-database. In EXPLORE, useful updates are materially different hypotheses,
-evidence that kills an idea, contradictions with reality, and questions of
-Beekeeper taste. Avoid duplicate brainstorm essays. In COMMIT, share facts that
-change another member's implementation: interfaces, dependencies, claims,
-handoffs, and integration findings.
-
-Room mentions have the same deterministic meaning from a member's `hive say`
-and the Beekeeper's WebUI: `@member` prompts that member, waking a stopped
-session; `@all` prompts other members, excluding the author and Beekeeper.
-Plain posts remain awareness updates. `--room-only` can record quoted mentions
-without terminal delivery. Targeted delivery does not change semantic authority.
-The Room append completes before any terminal delivery; failures are reported
-without losing or reposting the entry. Per-member prompt locks prevent
-overlapping wake/paste/submit operations. The existing UserPromptSubmit hook
-records a timestamp and prompt digest to confirm submission without storing
-prompt contents; an Enter retry is allowed only while that delivery is still
-visible at the input cursor. Unconfirmed submission must not be called success.
-
-### 7.1 Peer messages are information, not authority
-
-A Room message does not become a user instruction merely because another member wrote it.
-
-A member must not abandon the Beekeeper's objective solely because a peer requested something.
-
-Peer messages may provide facts, reveal interface changes, expose conflicts, suggest collaboration, or request help. They do not create a command hierarchy.
-
-### 7.2 Atomicity
-
-Concurrent `hive say` operations must not interleave.
-
-Use a simple local lock such as `flock`.
-
-On successful append:
-
-1. acquire Room lock;
-2. read generation;
-3. increment;
-4. append complete Room entry;
-5. atomically replace `.room-generation`;
-6. release lock.
-
-The Room remains canonical history. The generation file is a cheap awareness cursor.
-
-Distributed consensus is out of scope.
+Setting a member's `state/transport.json` to `{"adapter":"native"}` pauses the
+old injector and tmux notifications while preserving queues. Integrating the
+reported offline native adapter is a separate verification step; do not enable
+two independent transports or roll back to an injector that ignores IDs/scope.
 
 ## 8. Member Rooms
 
@@ -856,20 +843,17 @@ Do not inject the entire Knowledge Vault or every member room.
 
 ### 12.3 Safe work boundary
 
-At a safe lifecycle/tool boundary:
+At a safe lifecycle/tool boundary, select subscribed unseen messages under the
+character/message ceilings. Persist the offered batch before stdout handoff;
+accept only the offered IDs after handoff. Advance the contiguous cursor across
+accepted, already delivered or explicitly out-of-scope entries. Keep omitted
+entries unread and preserve urgent IDs accepted ahead of the cursor. If a lock
+is busy or bounded hook work times out, leave the batch/cursor pending.
 
-```text
-current = Room generation
-delivered = member last-delivered-generation
-```
-
-If `current == delivered`, the adapter emits nothing.
-
-If `current > delivered`, the adapter surfaces only the unseen Room entries, then advances the cursor after successful delivery.
-
-The member decides whether they matter.
-
-Do not interrupt a fragile operation merely because the Room changed.
+Stable file metadata avoids repeated history scans when caught up. Git metadata
+is cached briefly; quota attempts are throttled even without a usable snapshot,
+and transcript discovery/tail reads are bounded. Hooks do not classify work or
+load notes/contracts wholesale.
 
 ### 12.4 No acknowledgement ritual
 
@@ -909,8 +893,8 @@ Implement one harness well, validate it, then add the next.
 
 The working system instruction should stay small. The canonical injected text
 is [share/member-instruction.md](share/member-instruction.md), shared by the
-Claude Code and Codex launch adapters. Keep the EXPLORE/COMMIT framing and
-examples there rather than maintaining competing prompt copies here. This
+Claude Code and Codex launch adapters. Keep general EXPLORE/COMMIT framing there. Product/game coaching and dev-log
+formatting are optional packaged guidance under share/guidance/. This
 framing guides generalists; it does not mechanize creativity or add coordination
 protocols. Do not inject the full implementation specification into every member.
 
@@ -967,7 +951,7 @@ Normal agents should not need to run `observe` repeatedly; harness hooks provide
 Correctness path:
 
 ```text
-ROOM.md + generation + explicit/manual inspection
+messages.jsonl + delivery state + explicit/manual inspection
 ```
 
 Optimization path:
@@ -982,7 +966,7 @@ The next successful boundary check or manual inspection can catch up.
 
 Notification semantics:
 - no scheduling authority;
-- no automatic waking of stopped sessions;
+- routine updates cause no wakes; named actionable requests may wake once;
 - no automatic acceptance of peer requests;
 - no full-Hive context dump;
 - may coalesce multiple changes;
@@ -1039,7 +1023,13 @@ Example:
 }
 ```
 
-Telemetry is explicitly **non-authoritative**.
+Process existence remains derived from the actual pane process tree. Explicit
+`working` turn state survives stale hooks until Stop/SessionEnd or an explicit
+owner recovery. Freshness beyond 120 seconds is separately `unknown`, never a
+reason to infer idle or bypass a kill/restart guard. A missing Stop can therefore
+require a deliberate `--force` recovery after inspecting the session.
+
+Telemetry is explicitly **non-authoritative** about process existence.
 
 If telemetry disagrees with `ps`, filesystem, Git, claims, or Room, real system state wins.
 
@@ -1251,14 +1241,13 @@ Preserve concrete incidents.
 
 ## 23. Explicit v0.1 Freeze
 
-During the first experiment, do **not** add:
+The owner-approved filesystem messages/channels in §7 refine the initial
+experiment. Continue to exclude:
 
 - supervisor/planner agent;
 - permanent specialist roles;
 - automatic task allocation;
 - autonomous agent spawning/waking;
-- peer-to-peer direct mail;
-- channels/subscriptions;
 - semantic message routing;
 - agent capability/profile database;
 - vector memory;

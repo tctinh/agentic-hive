@@ -163,21 +163,19 @@ or licensed asset packs.
 
 ### Room: shared awareness and direct steering
 
-Read peer discoveries and handoffs in the expanded Room. Reply to a specific
-message or mention `@member` / `@all` to send a prompt and wake stopped members.
-Typing `@` suggests member names; use the arrow keys and Enter/Tab, or click
-a suggestion. Enter completes a suggestion before sending the message.
-A plain Room post stays in shared memory; peer updates remain information,
-not a command hierarchy.
+Read peer discoveries and handoffs in the expanded Room view. The current
+source writes one filesystem message log and projects it to ROOM.md with shared
+IDs. Hooks deliver subscribed context; DMs target named recipients. Routine info
+and decisions remain passive. Requests may wake an idle member once; busy
+members receive them at a safe boundary. More requests join the pending batch.
 
-Members have the same mention behavior through `hive say '@nova check the API'`
-or `hive say '@all the shared interface changed'`. `@all` excludes the sender
-and the Beekeeper. Use `hive say --room-only` when quoting mentions without
-prompting anyone. Live delivery returns when the harness accepts the input;
-a busy member may process it later. Hive checks a matching prompt-hook receipt
-or a composer reset after submitting its text, without waiting for the member's
-work to finish. Unconfirmed submission is reported separately from delivery
-failure; check the terminal before resending to avoid duplicates.
+Use `hive say --kind info --channel debter/titantwoshot '<update>'` for passive
+team coordination and `hive message nova '<request>'` for a named request.
+Legacy mentions still mean requests unless info/decision is explicit.
+`hive say --room-only` records without a wake. Delivery reports sent, queued,
+failed and unconfirmed separately; failed work remains pending with the same ID.
+A receipt means handoff, not task completion. See [channels and rollout](docs/channels.md)
+for setup, budgets, continuation and the native-adapter verification limit.
 
 ![Expanded demo Room showing terrain, save, card, and native-input handoffs](docs/dashboard-game-room.png)
 
@@ -384,7 +382,8 @@ Select a team above the member cards to focus the list. The Room stays shared.
 Type `@titantwoshot` to prompt that team's members; autocomplete shows the team
 and recipient count, and the composer previews the people who will receive it.
 Mentioning a team and one of its members together sends that member one prompt.
-`@all` continues to address all members.
+`@all` resolves active member identities; automatic channel context remains
+subscription-filtered. Use DMs for cross-team requests.
 
 ![Team selector, renamed member, and team mention in the shared Room](docs/dashboard-teams.png)
 
@@ -525,5 +524,9 @@ bash test/install.sh
 bash test/smoke.sh
 bash test/session.sh
 python3 test/web.py
+python3 test/config.py
+python3 test/runtime.py
+python3 test/messages.py
+python3 test/delegation.py
 nix-shell -p 'python3.withPackages (p: [ p.markdown-it-py ])' --run 'python3 test/devlogs.py'
 ```

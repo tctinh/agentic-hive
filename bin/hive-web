@@ -44,7 +44,7 @@ HIVE_ROOT = Path(os.environ.get("HIVE_ROOT", "/srv/hive"))
 SHARE = Path(os.environ.get("HIVE_SHARE") or Path(__file__).resolve().parent.parent / "share/agentic-hive")
 if not (SHARE / "dashboard.html").is_file():  # plain git checkout ships share/ directly
     SHARE = Path(__file__).resolve().parent.parent / "share"
-WORKING_WINDOW = 120  # seconds of inactivity before "working" becomes "idle"
+WORKING_WINDOW = 120  # freshness only; explicit working state is retained
 ROOM_TAIL_BYTES = 512 * 1024
 ROOM_ENTRIES = 40
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -440,7 +440,7 @@ def members(generation, now, room_entries):
         live_pid = pane_harness_pid(panes.get(name), harness)
         if live_pid:
             recent = last is not None and now - last < WORKING_WINDOW
-            state = "working" if t.get("status") == "working" and recent else "idle"
+            state = t.get("status") if t.get("status") in ("working", "idle") else "unknown"
         elif not t and name not in panes:
             state = "never"
         else:
@@ -455,6 +455,7 @@ def members(generation, now, room_entries):
             "team": profile["team"],
             "workdir": profile["workdir"] or launch.get("dir") or cwd or str(HIVE_ROOT / "projects"),
             "state": state,
+            "telemetry_freshness": "recent" if last is not None and 0 <= now - last < WORKING_WINDOW else "unknown",
             "harness": harness or None,
             "pid": live_pid or t.get("pid"),
             "started_at": t.get("started_at"),
@@ -503,7 +504,11 @@ def room(limit=ROOM_ENTRIES):
             if cur["ts"] is None and line.startswith("## "):
                 cur["ts"] = line[3:].split(" — ", 1)[0]
             else:
-                cur["body"].append(line)
+                metadata = re.fullmatch(r"<!-- hive:message id=([^ ]+) channel=([^ ]+) -->", line)
+                if metadata and "id" not in cur:
+                    cur["id"], cur["channel"] = metadata.groups()
+                else:
+                    cur["body"].append(line)
     for e in entries:
         body = "\n".join(e["body"]).strip()
         body = re.sub(r"\n*Generation: %d\s*$" % e["gen"], "", body).strip()
@@ -880,10 +885,10 @@ class Handler(BaseHTTPRequestHandler):
                     member = req.get("member")
                     if not isinstance(member, str) or not MEMBER_RE.fullmatch(member) or is_beekeeper(member):
                         raise ValueError("known agent member required")
-                    for key in ("name", "team", "workdir"):
+                    for key in ("name", "team", "workdir", "project"):
                         if key in req and not isinstance(req[key], str):
                             raise ValueError(f"{key} must be text")
-                    profile = hive_members.update(HIVE_ROOT, member, name=req.get("name"), team=req.get("team"), workdir=req.get("workdir"))
+                    profile = hive_members.update(HIVE_ROOT, member, name=req.get("name"), team=req.get("team"), workdir=req.get("workdir"), project=req.get("project"))
                     self._send(200, json.dumps({"ok": True, "profile": profile}), "application/json")
                     return
                 if self.path == "/api/identity":

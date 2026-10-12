@@ -56,7 +56,7 @@ check "concurrent says: unique gens" test "$(grep -o 'gen=[0-9]*' "$HIVE_ROOT/RO
 
 # Large backlog is bounded.
 ctx=$(hook bob PostToolUse | jq -r .hookSpecificOutput.additionalContext)
-check "backlog truncated with pointer" grep -q 'earlier entries omitted' <<<"$ctx"
+check "backlog starts with oldest unread entry" grep -q '\[2\] alice' <<<"$ctx"
 check "backlog capped at 12" test "$(grep -c '^\[[0-9]*\] ' <<<"$ctx")" = 12
 
 # Forged markers in bodies are neutralized.
@@ -137,7 +137,8 @@ check "statusline outside hive is model only" test "$(HIVE_MEMBER= hive-statusli
 mkdir -p "$HIVE_ROOT/cx/sessions/2026/09/30"
 printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1790800000},"secondary":{"used_percent":64,"window_minutes":10080,"resets_at":1791200000},"plan_type":"plus"}}}' \
   >"$HIVE_ROOT/cx/sessions/2026/09/30/rollout-x.jsonl"
-CODEX_HOME="$HIVE_ROOT/cx" HIVE_MEMBER=bob hive-hook codex Stop <<<'{"cwd":"/tmp"}' >/dev/null
+rm -f "$HIVE_ROOT/members/bob/state/quota-cache.json" "$HIVE_ROOT/members/bob/state/quota-attempt"
+CODEX_HOME="$HIVE_ROOT/cx" HIVE_MEMBER=bob hive-hook codex Stop <<<"{\"cwd\":\"/tmp\",\"transcript_path\":\"$HIVE_ROOT/cx/sessions/2026/09/30/rollout-x.jsonl\"}" >/dev/null
 check "codex quota recorded" test "$(jq -r '[.windows[] | "\(.name)=\(.used_percent)"] | join(",")' "$HIVE_ROOT/telemetry/quota/codex.json")" = "5h=12.5,week=64"
 check "dashboard shows quota" grep -q 'QUOTA codex: 5h 12% · week 64%' <(hive-dash --once)
 
@@ -151,7 +152,7 @@ EOF
 chmod +x "$HIVE_ROOT/test-bin/hive-member"
 export HIVE_MEMBER_BIN="$HIVE_ROOT/test-bin/hive-member"
 HIVE_MEMBER=alice hive delegate bob --task "refactor parser" --worktree "/tmp/wt" --branch "bob/parser" --claim "data/parser.json" >/dev/null
-check "delegation sends work prompt" grep -q '^send bob Delegated task from alice: refactor parser' "$HIVE_ROOT/session-calls"
+check "delegation sends work prompt" grep -q 'DELEGATE -> bob: refactor parser' "$HIVE_ROOT/session-calls"
 check "delegation creates state" test -f "$HIVE_ROOT/members/bob/state/delegation.json"
 check "delegation depth is 1" test "$(jq -r .depth "$HIVE_ROOT/members/bob/state/delegation.json")" = "1"
 check "delegation announced in Room" grep -q 'DELEGATE -> bob: refactor parser' "$HIVE_ROOT/ROOM.md"
@@ -163,10 +164,13 @@ check "delegation done archives state" test -f "$HIVE_ROOT/members/bob/state/del
 check "delegation claim released" test ! -d "$HIVE_ROOT/claims/data%2Fparser.json"
 check "delegation done announced in Room" grep -q 'DONE (delegated by alice): parser refactored' "$HIVE_ROOT/ROOM.md"
 HIVE_MEMBER=alice hive message carol "review parser" >/dev/null
-check "member message invokes member send" grep -q '^send carol Message from Hive member alice: review parser$' "$HIVE_ROOT/session-calls"
-check "member message recorded in Room" grep -q 'MESSAGE -> carol: review parser' "$HIVE_ROOT/ROOM.md"
+check "member message invokes member send" grep -q 'review parser' "$HIVE_ROOT/session-calls"
+check "member message recorded in Room" grep -q 'review parser' "$HIVE_ROOT/ROOM.md"
 before=$(cat "$HIVE_ROOT/.room-generation")
+# Clear the previous coalesced wake to exercise a new failed handoff.
+HIVE_MEMBER=carol hive-hook claude PostToolUse <<<'{}' >/dev/null
+HIVE_MEMBER=carol hive-hook claude Stop <<<'{}' >/dev/null
 check "failed member delivery is reported" bash -c '! HIVE_TEST_FAIL=1 HIVE_MEMBER=alice hive message carol "unavailable task" >/dev/null 2>&1'
-check "failed member delivery is not announced" test "$(cat "$HIVE_ROOT/.room-generation")" = "$before"
+check "failed member delivery stays in durable log" grep -q "unavailable task" "$HIVE_ROOT/messages.jsonl"
 
 echo "all $pass checks passed"

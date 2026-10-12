@@ -74,13 +74,13 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertEqual(data["sent"], ["alice", "bob"])
         self.assertEqual((self.root / ".room-generation").read_text().strip(), "1")
         self.assertEqual(sorted((self.root / "sent-targets").read_text().splitlines()), ["alice", "bob"])
-        self.assertIn("Message from Beekeeper in the Room:", (self.root / "sent-alice").read_text())
+        self.assertIn("sender_authority=owner", (self.root / "sent-alice").read_text())
 
     def test_cli_room_mentions_prompt_peers_and_skip_sender_and_beekeeper(self):
         data = json.loads(web.run_hive("hive", "say", "--json", "@all @alice @bob. check the interface", member="alice"))
         self.assertEqual(data["sent"], ["bob"])
         self.assertEqual((self.root / "sent-targets").read_text().splitlines(), ["bob"])
-        self.assertIn("peer information, not Beekeeper authority", (self.root / "sent-bob").read_text())
+        self.assertIn("sender_authority=peer", (self.root / "sent-bob").read_text())
 
     def test_room_reports_partial_delivery_without_losing_or_reposting_message(self):
         with patch.dict(os.environ, {"HIVE_TEST_FAIL_MEMBER": "bob"}):
@@ -129,16 +129,15 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertEqual((self.root / ".room-generation").read_text().strip(), "0")
         self.assertFalse((self.root / "sent-targets").exists())
 
-    def test_unavailable_delivery_temp_directory_fails_before_room_append(self):
+    def test_delivery_uses_member_state_when_external_temp_directory_is_unavailable(self):
         blocked = self.root / "not-a-directory"
         blocked.write_text("blocked")
         with patch.dict(os.environ, {"TMPDIR": str(blocked)}):
             status, data = self.request("/api/room", {"message": "@alice please check this"})
-        self.assertEqual(status, 400)
-        self.assertIn("mktemp", data["error"])
-        self.assertEqual((self.root / ".room-generation").read_text().strip(), "0")
-        self.assertNotIn("please check this", (self.root / "ROOM.md").read_text())
-        self.assertFalse((self.root / "sent-targets").exists())
+        self.assertEqual(status, 200)
+        self.assertEqual(data["sent"], ["alice"])
+        self.assertEqual((self.root / ".room-generation").read_text().strip(), "1")
+        self.assertIn("please check this", (self.root / "ROOM.md").read_text())
 
     def test_lifecycle_buttons_execute_session_commands(self):
         with patch.object(web, "run_hive", return_value="ok") as run:
@@ -168,6 +167,14 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
             status, _ = self.request("/api/member", {"member": "alice", "action": "kill"}, "http://other.site")
         self.assertEqual(status, 403)
         run.assert_not_called()
+
+    def test_stale_working_turn_keeps_guard_state_and_exposes_unknown_freshness(self):
+        path=self.root/'telemetry/members/alice.json';path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text('{"status":"working","harness":"codex","last_activity":"2000-01-01T00:00:00+00:00"}')
+        with patch.object(web,'member_panes',return_value={'alice':{}}), patch.object(web,'pane_harness_pid',return_value=123):
+            member=next(m for m in web.members(0,1700000000,[]) if m['member']=='alice')
+        self.assertEqual(member['state'],'working')
+        self.assertEqual(member['telemetry_freshness'],'unknown')
 
     def test_member_card_uses_latest_room_message(self):
         posts = [{"member": "alice", "body": "first", "ts": "2026-10-01T10:00:00-04:00"},
@@ -222,7 +229,8 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertIn("@titantwoshot @atlas @alice", web.room()[0]["body"])
         self.assertFalse((self.root / "teams").exists())
         data = json.loads(web.run_hive("hive", "say", "--json", "@titantwoshot @atlas @carol peers check this", member="alice"))
-        self.assertEqual(data["sent"], ["bob", "carol"])
+        self.assertEqual(data["sent"], ["carol"])
+        self.assertEqual(data["queued"], ["bob"])
 
     def test_aliases_route_prompts_lifecycle_and_terminals_to_existing_sessions(self):
         self.request("/api/member-profile", {"member": "alice", "name": "atlas"})
@@ -289,7 +297,7 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertEqual(status, 200)
         self.assertEqual(data["sent"], ["alice", "bob"])
         self.assertIn("member=beekeeper-tctinh", (self.root / "ROOM.md").read_text())
-        self.assertIn("Message from Beekeeper beekeeper-tctinh in the Room", (self.root / "sent-alice").read_text())
+        self.assertIn("beekeeper-tctinh", (self.root / "sent-alice").read_text())
         self.assertFalse((self.root / "members/beekeeper-tctinh").exists())
         with patch.object(web, "run_hive", return_value="ok") as run:
             self.assertEqual(self.request("/api/steer", {"member": "alice", "prompt": "check the API"}, cookie="hive_beekeeper=tctinh")[0], 200)

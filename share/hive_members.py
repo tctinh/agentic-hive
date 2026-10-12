@@ -1,4 +1,4 @@
-"""Member names and team labels over existing nests; no task or channel state."""
+"""Member names and team labels over existing nests; explicit project and team membership."""
 import argparse
 import fcntl
 import json
@@ -23,8 +23,10 @@ def profiles(root):
         except (OSError, ValueError):
             value = {}
         name, team, workdir = value.get("name", nest.name), value.get("team"), value.get("workdir")
+        project = value.get("project")
         result.append({"member": nest.name,
                        "name": name if isinstance(name, str) and HANDLE.fullmatch(name) else nest.name,
+                       "project": project if isinstance(project, str) and HANDLE.fullmatch(project) else None,
                        "team": team if isinstance(team, str) and HANDLE.fullmatch(team) else None,
                        "workdir": workdir if isinstance(workdir, str) and workdir.startswith("/") else None})
     return result
@@ -43,7 +45,7 @@ def index(root):
     members = profiles(root)
     teams = {}
     for member in members:
-        if member["team"]:
+        if member["team"] and not member.get("project"):
             teams.setdefault(member["team"], []).append(member["member"])
     return {"members": members, "teams": teams}
 
@@ -59,7 +61,7 @@ def handle(value, label):
     return value
 
 
-def update(root, member, *, name=None, team=None, workdir=None):
+def update(root, member, *, name=None, team=None, workdir=None, project=None):
     root = Path(root)
     with (root / ".members.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -70,17 +72,19 @@ def update(root, member, *, name=None, team=None, workdir=None):
             name = handle(name, "Name")
             if any(row["member"] != member and name in (row["member"], row["name"]) for row in members):
                 raise ValueError("That name belongs to another member")
-            if any(row["team"] == name for row in members):
+            if any(row["team"] == name and not row.get("project") for row in members):
                 raise ValueError("That name is already a team tag")
             profile["name"] = name
+        if project is not None:
+            profile["project"] = handle(project, "Project") if project.strip() else None
         if team is not None:
             if not isinstance(team, str):
                 raise ValueError("Team must be text")
             team = handle(team, "Team") if team.strip() else None
-            if team and any(team in (row["member"], row["name"]) for row in members):
+            if team and not profile.get("project") and any(team in (row["member"], row["name"]) for row in members):
                 raise ValueError("That team tag belongs to a member")
             # A name and team cannot collide within the same edit either.
-            if team and team == profile["name"]:
+            if team and not profile.get("project") and team == profile["name"]:
                 raise ValueError("Member name and team tag must differ")
             profile["team"] = team
         if workdir is not None:
@@ -95,12 +99,14 @@ def update(root, member, *, name=None, team=None, workdir=None):
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".profile-")
         try:
             with os.fdopen(fd, "w") as stream:
-                json.dump({key: profile[key] for key in ("name", "team", "workdir")}, stream)
+                json.dump({key: profile[key] for key in ("name", "team", "workdir", "project")}, stream)
             os.chmod(temporary, 0o664)
             os.replace(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        from hive_messages import sync_profile
+        sync_profile(root, member)
         return profile
 
 
@@ -110,6 +116,7 @@ def main():
     parser.add_argument("member", nargs="?")
     parser.add_argument("--name")
     parser.add_argument("--team")
+    parser.add_argument("--project")
     parser.add_argument("--dir", dest="workdir")
     args = parser.parse_args()
     root = Path(os.environ.get("HIVE_ROOT", "/srv/hive"))
@@ -118,7 +125,7 @@ def main():
             print(resolve(root, args.member))
         else:
             print(json.dumps(index(root) if args.command == "list" else
-                             update(root, args.member, name=args.name, team=args.team, workdir=args.workdir)))
+                             update(root, args.member, name=args.name, team=args.team, workdir=args.workdir, project=args.project)))
     except (ValueError, OSError) as error:
         parser.exit(1, f"hive-member: {error}\n")
 

@@ -9,6 +9,7 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -828,6 +829,24 @@ def actionable(rows, row, member):
     return False
 
 
+def journal_owns_batch(path, pending, telemetry):
+    """Only the sender's exact current-session batch may bypass an attempt latch.
+
+    The sender still checks the visible draft before any input. An unrelated
+    journal cannot authorize replay of an older, uninspected queue batch.
+    """
+    journal = load(path / "prompt-delivery.json")
+    batch = pending.get("batch") or {}
+    text = batch.get("text")
+    session = telemetry.get("session_id")
+    return bool(isinstance(journal, dict) and session
+        and journal.get("session_id") == session
+        and journal.get("stage") in ("queued", "pasted", "submitted", "accepted", "acknowledged")
+        and isinstance(text, str) and batch.get("ids")
+        and journal.get("ids") == batch["ids"]
+        and journal.get("hash") == hashlib.sha256(text.strip().encode()).hexdigest())
+
+
 def dispatch(root, row, *, retry=False):
     """Coalesce idle wake work; busy/offline/native recipients remain queued.
 
@@ -857,8 +876,12 @@ def dispatch(root, row, *, retry=False):
                 continue
             pending = load(path / "pending-wake.json", {"ids": [], "attempted": False})
             pending["ids"] = list(dict.fromkeys([*pending["ids"], row["id"]]))
-            busy = load(Path(root) / "telemetry/members" / f"{member}.json").get("status") == "working"
-            if adapter(root, member) != "hooks" or busy or (pending["attempted"] and not retry):
+            telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
+            busy = telemetry.get("status") == "working"
+            latched = pending["attempted"] and not retry
+            if latched and journal_owns_batch(path, pending, telemetry):
+                latched = False
+            if adapter(root, member) != "hooks" or busy or latched:
                 atomic(path / "pending-wake.json", pending)
                 report["queued"].append(member)
                 continue

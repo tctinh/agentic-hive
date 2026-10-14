@@ -50,6 +50,17 @@ without repasting; unrelated drafts and dialogs remain untouched. Legacy
 attempted batches without this journal require deliberate inspection before
 recovery. Offline, failed, unconfirmed and native-marked messages stay pending.
 
+A separated status footer in the final three terminal rows is excluded only
+after the complete owned input matches, or a known placeholder or paste marker
+is recognized. Unknown indented text below the cursor remains part of the draft
+and blocks submission when it does not match. This bounded footer recognition
+does not authorize blind submission of an uninspected live draft.
+
+A later mention can retry an attempted batch only when its full text hash,
+logical IDs and current session match the sender journal. The sender verifies
+the visible owned draft again and never repastes it. An unrelated or missing
+journal leaves the attempt queued for inspection; a busy member stays queued.
+
 Results reference a request and reach the recorded requester. They wake only if
 that request was pending before the result. Receiving a request does not resolve
 it. Use a result, or an explicit resolving decision with `--reply-to REQUEST_ID

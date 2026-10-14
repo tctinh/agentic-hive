@@ -232,6 +232,76 @@ class MessageTests(unittest.TestCase):
             messages.drain(self.root, "bob")
             self.assertEqual(run.call_count, 1)
 
+    def test_new_mention_retries_exact_journaled_batch_without_rebuilding_it(self):
+        import hashlib
+        atomic(self.root / "telemetry/members/bob.json", {"status":"idle", "session_id":"fixture"})
+        first = self.post("first", channel="dm", kind="request", recipients=["bob"])
+        path = self.root / "members/bob/state"
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 2
+            run.return_value.stderr = "paste retained"
+            messages.dispatch(self.root, first)
+            batch = json.loads((path / "pending-wake.json").read_text())["batch"]
+            atomic(path / "prompt-delivery.json", {
+                "session_id":"fixture", "stage":"pasted", "ids":batch["ids"],
+                "hash":hashlib.sha256(batch["text"].strip().encode()).hexdigest()})
+            second = self.post("second", channel="dm", kind="request", recipients=["bob"])
+            run.return_value.returncode = 0
+            report = messages.dispatch(self.root, second)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args.args[0][-1], batch["text"])
+            self.assertEqual(report["queued"], ["bob"])
+            self.assertEqual(report["sent"], [])
+            pending = json.loads((path / "pending-wake.json").read_text())
+            self.assertEqual(pending["ids"], [second["id"]])
+            self.assertFalse(pending["attempted"])
+
+    def test_attempt_latch_requires_exact_ids_hash_and_session(self):
+        import hashlib
+        atomic(self.root / "telemetry/members/bob.json", {"status":"idle", "session_id":"fixture"})
+        first = self.post("first", channel="dm", kind="request", recipients=["bob"])
+        path = self.root / "members/bob/state"
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 2
+            messages.dispatch(self.root, first)
+            batch = json.loads((path / "pending-wake.json").read_text())["batch"]
+            journal = {"session_id":"fixture", "stage":"pasted", "ids":batch["ids"],
+                "hash":hashlib.sha256(batch["text"].strip().encode()).hexdigest()}
+            for invalid in (dict(journal, ids=["another"]), dict(journal, hash="0"*64),
+                            dict(journal, session_id="another"), dict(journal, stage="unknown")):
+                with self.subTest(journal=invalid):
+                    atomic(path / "prompt-delivery.json", invalid)
+                    self.assertEqual(messages.dispatch(self.root, first)["queued"], ["bob"])
+            self.assertEqual(run.call_count, 1)
+            atomic(path / "prompt-delivery.json", journal)
+            atomic(self.root / "telemetry/members/bob.json", {"status":"working", "session_id":"fixture"})
+            self.assertEqual(messages.dispatch(self.root, first)["queued"], ["bob"])
+            self.assertEqual(run.call_count, 1)
+
+    def test_new_mention_with_owned_draft_runs_sender_without_a_second_paste(self):
+        import hive_prompt
+        from prompt import Terminal
+        import subprocess
+        path = self.root / "members/bob/state"
+        atomic(self.root / "telemetry/members/bob.json", {"status":"idle", "session_id":"fixture-session"})
+        terminal = Terminal(self.root)
+        terminal.footer = "  model status · 97% context left"
+        terminal.fail_paste = True
+        def transport(args, **kwargs):
+            code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
+            return subprocess.CompletedProcess(args, code, detail if code == 0 else "", detail if code else "")
+        with patch("hive_messages.subprocess.run", side_effect=transport):
+            first = self.post("first", channel="dm", kind="request", recipients=["bob"])
+            self.assertIn("bob", messages.dispatch(self.root, first)["unconfirmed"])
+            self.assertEqual((terminal.pastes,terminal.enters), (1,0))
+            terminal.fail_paste = False
+            second = self.post("second", channel="dm", kind="request", recipients=["bob"])
+            self.assertEqual(messages.dispatch(self.root, second)["queued"], ["bob"])
+            self.assertEqual((terminal.pastes,terminal.enters), (1,1))
+            self.assertEqual(json.loads((path / "prompt-delivery.json").read_text())["stage"], "acknowledged")
+            self.assertIn(first["id"], messages.state(self.root,"bob")["request_receipts"])
+            self.assertNotIn(second["id"], messages.state(self.root,"bob")["request_receipts"])
+
     def test_busy_to_idle_drain_and_new_working_race(self):
         atomic(self.root / "telemetry/members/bob.json", {"status":"working"})
         row = self.post("late busy", channel="dm", kind="request", recipients=["bob"])

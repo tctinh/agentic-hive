@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "share"))
 import hive_prompt as prompt
@@ -34,10 +35,12 @@ class Terminal:
         self.resize = False
         self.before_capture = False
         self.busy_after_load = False
+        self.footer = ""
+        self.below_cursor = ""
 
     def acknowledge(self):
         self.draft = ""
-        (self.root / "members/bob/state/last-submitted-prompt").write_text(f"fixture-{self.ticks} {prompt.prompt_hash(self.message)}\n")
+        (self.root / "members/bob/state/last-submitted-prompt").write_text(f"{1000000000000000000 + self.ticks} {prompt.prompt_hash(self.message)}\n")
 
     def run(self, args, **kwargs):
         self.calls.append(args)
@@ -59,6 +62,10 @@ class Terminal:
                 lines = self.draft.split("\n") if self.draft else ["Ask Codex to do anything"]
                 out = "Transcript\n› " + lines[0] + "\n"
                 out += "".join(("  " + line if line else "") + "\n" for line in lines[1:])
+                if self.below_cursor and self.pastes:
+                    out += self.below_cursor + "\n"
+                if self.footer:
+                    out += "\n" + self.footer + "\n"
         elif args[1] == "load-buffer":
             self.message = kwargs["input"]
             if self.busy_after_load:
@@ -105,6 +112,207 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(self.send()[0], 0)
         self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
         self.assertEqual(self.stage(), "acknowledged")
+
+    def test_indented_status_footer_one_paste_one_enter(self):
+        self.terminal.footer = "  model status · 97% context left"
+        self.assertEqual(self.send()[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
+        self.assertEqual(self.stage(), "acknowledged")
+
+    def retained_old_batch(self):
+        old_hash = prompt.prompt_hash(self.message)
+        atomic(self.root / "members/bob/state/prompt-delivery.json", {
+            "hash":old_hash, "ids":["fixture-one"], "session_id":"fixture-session",
+            "pane_id":"%7", "receipt_before":"900000000000000000 " + "a" * 64,
+            "stage":"pasted"})
+        return old_hash
+
+    def test_exact_old_receipt_retires_stale_journal_before_new_batch(self):
+        old_hash = self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
+        new = "HIVE messages\n[hive-message id=fixture-two]\nnew request"
+        self.assertEqual(self.send(new)[0], 0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        self.assertEqual(self.stage(),"acknowledged")
+
+    def test_old_receipt_reconciliation_never_submits_unrelated_draft(self):
+        old_hash = self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
+        self.terminal.draft = "UNRELATED USER DRAFT"
+        self.assertEqual(self.send("different request")[0],3)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+        self.assertEqual(self.terminal.draft,"UNRELATED USER DRAFT")
+        self.assertEqual(self.stage(),"acknowledged")
+
+    def test_higher_cursor_and_request_receipts_cannot_retire_old_journal(self):
+        self.retained_old_batch()
+        atomic(self.root / "members/bob/state/delivery.json", {
+            "cursor":999999, "request_receipts":["fixture-one"]})
+        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.stage(),"pasted")
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+
+    def test_old_receipt_overwritten_by_new_prompt_stays_unconfirmed(self):
+        self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + prompt.prompt_hash("another prompt"))
+        atomic(self.root / "members/bob/state/delivery.json", {
+            "cursor":999999, "request_receipts":["fixture-one"]})
+        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.stage(),"pasted")
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+
+    def test_old_receipt_different_session_cannot_retire_journal(self):
+        old_hash = self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
+        atomic(self.root / "telemetry/members/bob.json", {"session_id":"other-session", "status":"idle"})
+        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.stage(),"pasted")
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+
+    def test_exact_old_ack_does_not_replay_old_batch(self):
+        old_hash = self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
+        self.assertEqual(self.send()[0],0)
+        self.assertEqual(self.stage(),"acknowledged")
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+
+    def test_reconciliation_then_interrupted_new_paste_keeps_retry_idempotent(self):
+        old_hash = self.retained_old_batch()
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
+        new = "HIVE messages\n[hive-message id=fixture-two]\nnew request"
+        self.terminal.fail_paste = True
+        self.assertEqual(self.send(new)[0],2)
+        self.terminal.fail_paste = False
+        self.assertEqual(self.send(new)[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+
+    def test_receipt_evidence_must_be_complete_new_and_exact(self):
+        old_hash = self.retained_old_batch()
+        record=json.loads((self.root / "members/bob/state/prompt-delivery.json").read_text())
+        for receipt in ("", "900000000000000000 " + old_hash,
+                        "800000000000000000 " + old_hash,
+                        "not-a-number " + old_hash,
+                        "950000000000000000 " + "b" * 64):
+            with self.subTest(receipt=receipt):
+                self.assertFalse(prompt.receipt_acknowledges(record,receipt,"fixture-session"))
+        self.assertTrue(prompt.receipt_acknowledges(record,"950000000000000000 " + old_hash,"fixture-session"))
+        self.assertFalse(prompt.receipt_acknowledges(dict(record,hash=None),"950000000000000000 " + old_hash,"fixture-session"))
+        self.assertFalse(prompt.receipt_acknowledges(dict(record,receipt_before=None),"950000000000000000 " + old_hash,"fixture-session"))
+
+    def test_hook_proof_survives_later_prompt_receipt_overwrite(self):
+        self.retained_old_batch()
+        with patch("hive_prompt.time.time_ns",return_value=950000000000000000):
+            self.assertTrue(prompt.record_receipt(self.root,"bob",{"prompt":self.message,"session_id":"fixture-session"}))
+        (self.root / "members/bob/state/last-submitted-prompt").write_text("960000000000000000 " + prompt.prompt_hash("later prompt"))
+        self.assertEqual(self.send("new different request")[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+
+    def test_hook_proof_does_not_authorize_unrelated_draft(self):
+        self.retained_old_batch()
+        with patch("hive_prompt.time.time_ns",return_value=950000000000000000):
+            self.assertTrue(prompt.record_receipt(self.root,"bob",{"prompt":self.message,"session_id":"fixture-session"}))
+        self.terminal.draft="OTHER USER DRAFT"
+        self.assertEqual(self.send("new different request")[0],3)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+        self.assertEqual(self.terminal.draft,"OTHER USER DRAFT")
+
+    def test_hook_proof_requires_exact_journal_hash_ids_session_and_before(self):
+        self.retained_old_batch()
+        with patch("hive_prompt.time.time_ns",return_value=950000000000000000):
+            for payload in ({"prompt":"wrong body","session_id":"fixture-session"},
+                            {"prompt":self.message,"session_id":"other"},
+                            {"prompt":self.message}):
+                self.assertFalse(prompt.record_receipt(self.root,"bob",payload))
+            self.assertTrue(prompt.record_receipt(self.root,"bob",{"prompt":self.message,"session_id":"fixture-session"}))
+        proof=json.loads((self.root / "members/bob/state/journal-prompt-receipt.json").read_text())
+        record=json.loads((self.root / "members/bob/state/prompt-delivery.json").read_text())
+        self.assertTrue(prompt.proof_acknowledges(record,proof,"fixture-session"))
+        self.assertFalse(prompt.proof_acknowledges(dict(record,receipt_before="910000000000000000 " + "a"*64),proof,"fixture-session"))
+        self.assertFalse(prompt.proof_acknowledges(dict(record,ids=["other-request"]),proof,"fixture-session"))
+        self.assertFalse(prompt.proof_acknowledges(record,dict(proof,event="PostToolUse"),"fixture-session"))
+
+    def test_unrelated_later_prompt_does_not_overwrite_prior_exact_proof(self):
+        self.retained_old_batch()
+        with patch("hive_prompt.time.time_ns",return_value=950000000000000000):
+            self.assertTrue(prompt.record_receipt(self.root,"bob",{"prompt":self.message,"session_id":"fixture-session"}))
+            original=(self.root / "members/bob/state/journal-prompt-receipt.json").read_bytes()
+            self.assertFalse(prompt.record_receipt(self.root,"bob",{"prompt":"another request","session_id":"fixture-session"}))
+            self.assertEqual((self.root / "members/bob/state/journal-prompt-receipt.json").read_bytes(),original)
+
+    def test_actual_prompt_hook_records_exact_proof_in_synthetic_root(self):
+        import os
+        self.retained_old_batch()
+        (self.root / ".room-generation").write_text("0\n")
+        repo=Path(__file__).resolve().parents[1]
+        env=dict(os.environ,HIVE_ROOT=str(self.root),HIVE_MEMBER="bob",HIVE_SHARE=str(repo/"share"),HIVE_BIN_DIR=str(repo/"bin"),HIVE_QUIET_MINUTES="0",PATH=str(repo/"bin")+":"+os.environ["PATH"])
+        payload=json.dumps({"prompt":self.message,"session_id":"fixture-session","cwd":str(self.root)})
+        subprocess.run([str(repo/"bin/hive-hook"),"claude","UserPromptSubmit"],input=payload,env=env,text=True,capture_output=True,check=True)
+        proof=json.loads((self.root / "members/bob/state/journal-prompt-receipt.json").read_text())
+        record=json.loads((self.root / "members/bob/state/prompt-delivery.json").read_text())
+        self.assertTrue(prompt.proof_acknowledges(record,proof,"fixture-session"))
+        self.assertEqual(record['stage'],'pasted')
+
+    def test_footer_with_single_line_and_blank_multiline_drafts(self):
+        for message in ("one line", "first\n\nsecond\n\n"):
+            with self.subTest(message=message):
+                self.terminal.footer = "  100% context left"
+                self.assertEqual(self.send(message)[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (2, 2))
+
+    def test_footer_retry_after_interrupted_paste_never_repastes(self):
+        self.terminal.footer = "  model status · 97% context left"
+        self.terminal.fail_paste = True
+        self.assertEqual(self.send()[0], 2)
+        self.terminal.fail_paste = False
+        self.assertEqual(self.send()[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
+
+    def test_footer_still_requires_matching_ack(self):
+        self.terminal.footer = "  model status · 97% context left"
+        self.terminal.ack_delay = 9999
+        self.assertEqual(self.send()[0], 2)
+        self.assertEqual(self.stage(), "accepted")
+        self.assertEqual(self.send()[0], 2)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
+        self.terminal.acknowledge()
+        self.assertEqual(self.send()[0], 0)
+
+    def test_unknown_below_cursor_text_is_not_dropped_as_footer(self):
+        self.terminal.footer = "  unexpected status or another draft"
+        self.assertEqual(self.send()[0], 2)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 0))
+
+    def test_extra_draft_below_cursor_blocks_even_with_real_footer(self):
+        self.terminal.footer = "  97% context left"
+        self.terminal.below_cursor = "  USER ADDITION"
+        self.assertEqual(self.send()[0], 2)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 0))
+
+    def test_footer_like_body_text_is_retained(self):
+        message = "first\n\n97% context left\nlast"
+        rows = ["Transcript", "› first", "", "  97% context left", "  last", "", "  98% context left"]
+        parts = prompt.composer(rows, 1, owned=True, expected=message)
+        self.assertTrue(prompt.matches(parts, message))
+        self.assertIn("97% context left", parts)
+        self.assertNotIn("98% context left", parts)
+        self.assertFalse(prompt.matches(prompt.composer(rows, 1, owned=True, expected="first"), "first"))
+
+    def test_footer_requires_bottom_position_and_blank_separation(self):
+        for rows, cursor in ((["› first", "  97% context left"], 0),
+                             (["› first", "", "  97% context left", "", "", ""], 0)):
+            with self.subTest(rows=rows):
+                self.assertFalse(prompt.matches(prompt.composer(rows, cursor, owned=True, expected="first"), "first"))
+
+    def test_footer_does_not_allow_shortened_or_mismatched_owned_message(self):
+        rows = ["› first", "", "  97% context left"]
+        self.assertFalse(prompt.matches(prompt.composer(rows, 0, owned=True, expected="first and more"), "first and more"))
+        self.assertFalse(prompt.matches(prompt.composer(rows, 0, owned=True), "first"))
+
+    def test_collapsed_owned_paste_with_footer(self):
+        self.terminal.footer = "  ? for shortcuts"
+        self.terminal.collapsed = True
+        self.assertEqual(self.send()[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
 
     def test_blank_rows_require_owned_composer(self):
         rows = ["old transcript", "› current", "", "  more", ""]

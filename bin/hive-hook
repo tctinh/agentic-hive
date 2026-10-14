@@ -235,6 +235,9 @@ case $event in
     ;;
   UserPromptSubmit)
     record_prompt
+    # Preserve exact evidence for an orphaned sender journal before a later
+    # prompt replaces the single receipt slot. No cursor inference or input.
+    timeout 0.3s python3 "$SHARE/hive_prompt.py" record-receipt <<<"$input" 2>/dev/null || true
     timeout 0.3s python3 "$SHARE/hive_messages.py" receipt <<<"$input" 2>/dev/null || true
     telemetry working
     deliver "$(

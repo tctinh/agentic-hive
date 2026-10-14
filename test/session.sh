@@ -102,7 +102,7 @@ printf 'renamed member wakes its original conversation in the selected project f
 
 : >"$HIVE_TEST_LOG"
 printf '%s\n' '{"harness":"bash","dir":"/tmp"}' >"$HIVE_ROOT/members/bob/state/launch.json"
-printf '%s\n' '{"pid":99999,"harness":"bash","status":"idle"}' >"$HIVE_ROOT/telemetry/members/bob.json"
+printf '%s\n' '{"pid":99999,"harness":"bash","status":"idle","session_id":"test-session"}' >"$HIVE_ROOT/telemetry/members/bob.json"
 HIVE_TEST_LIVE=1 "$repo/bin/hive-member" send bob 'do live task' >/dev/null
 rg -q '^tmux load-buffer -b hive-send-[0-9]+ -$' "$HIVE_TEST_LOG"
 rg -q '^tmux paste-buffer -d -p -r -b hive-send-[0-9]+ -t =hive-bob:0.0$' "$HIVE_TEST_LOG"

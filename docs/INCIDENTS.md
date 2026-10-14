@@ -128,3 +128,32 @@ blank/wrapped/narrow rows, dialogs, copy mode, delayed/stale ACK, duplicate IDs,
 interrupted paste/Enter, session/pane changes and working-state races. Queue
 tests include an actual Stop hook over an isolated root with a fake transport.
 These checks do not establish live rollout or recovery of existing drafts.
+
+## 2026-10-14 — an indented status footer is read as pasted input
+
+The rebuilt sender still retained one release request at its pasted stage.
+Its exact terminal layout was unavailable, so the actual cause remains
+unverified. An isolated reproduction using an indented context-status footer
+showed a separate parser defect: walking below the cursor included that footer
+as input, causing the complete owned-message comparison to fail.
+
+The parser now recognizes a narrowly formatted, blank-separated status footer
+at the terminal's bottom edge. It excludes that row only after all preceding
+input matches the complete expected draft, or is a known placeholder or paste
+marker. Other text below the cursor remains input; partial or mismatched drafts
+cannot use the footer boundary to pass. Request acknowledgment and the existing
+paste journal are unchanged.
+
+Synthetic regression controls cover one paste and one Enter with a matching
+acknowledgment, blank and multiline drafts, a footer-like line inside the body,
+unknown additional text, interrupted retries without repasting, and delayed
+acknowledgment. No live request was submitted or recovered by these tests.
+
+The installed queue also prevented a later mention from reaching that owned
+draft: `attempted=true` suppressed all automatic retries until another Stop.
+Read-only state showed four idle recipients of Room #11177 retaining the same
+batch at `pasted` without a new acknowledgment. A new mention now permits one
+guarded attempt when the batch's full hash, IDs and session match its journal.
+Legacy, mismatched and busy cases remain queued. An integrated fake-terminal
+test interrupts the first paste, adds a second request, and verifies one total
+paste and one Enter for the first batch with the second request retained.

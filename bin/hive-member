@@ -136,62 +136,15 @@ cmd_delete() {
   say "deleted $m (Room history retained)"
 }
 
-composer() {
-  local row line rows=()
-  row=$(tmux display-message -p -t "=hive-$1:0.0" '#{cursor_y}') || return 1
-  [[ $row =~ ^[0-9]+$ ]] || return 1
-  mapfile -t rows < <(tmux capture-pane -p -t "=hive-$1:0.0")
-  # Walk wrapped input up from the cursor, never search old transcript prompts.
-  for ((; row >= 0; row--)); do
-    line=${rows[row]:-}
-    case $line in
-      '› '* | '❯ '*) printf '%s' "${line#* }"; return 0 ;;
-      '  '*) ;;
-      *) return 1 ;;
-    esac
-  done
-  return 1
-}
-
 confirm_prompt() {
-  local m="$1" message="$2" before="$3" retry="${4:-0}" before_draft="${5:-}" receipt hash draft attempt
-  local entered=0 cleared=0 attempts=180
-  local receipt_file="$HIVE_ROOT/members/$1/state/last-submitted-prompt"
+  local m="$1" message="$2" before="$3" receipt hash
   hash=$(printf '%s' "$message" | jq -Rrjs 'gsub("^\\s+|\\s+$"; "")' | sha256sum | cut -d' ' -f1)
-  # UserPromptSubmit may run only when a busy harness processes queued input.
-  # A guarded Enter followed by a stably reset composer confirms handoff now;
-  # it does not claim the member has processed the message or completed work.
-  ((retry)) && attempts=40
-  for attempt in $(seq "$attempts"); do
+  for _ in $(seq 180); do
     sleep 0.25
-    receipt=$(cat "$receipt_file" 2>/dev/null || true)
+    receipt=$(cat "$HIVE_ROOT/members/$m/state/last-submitted-prompt" 2>/dev/null || true)
     if [[ $receipt != "$before" && ${receipt#* } == "$hash" ]]; then
       say "sent message to $m (submission confirmed)"
       return 0
-    fi
-    # Submit/retry Enter only while our text remains in the composer. Never
-    # repaste or send blind keystrokes into a dialog or an accepted turn.
-    if ((retry)) && draft=$(composer "$m"); then
-      # The visible first line may end at a newline or a narrow pane edge.
-      # Match that literal prefix rather than requiring 32 visible characters.
-      if [[ -n $draft && $message == "$draft"* ]] ||
-         [[ $draft != "$before_draft" && ( $draft == '[Pasted Content '* || $draft == '[Pasted text '* ) ]]; then
-        cleared=0
-        if ((attempt % 4 == 0)); then
-          tmux send-keys -t "=hive-$m:0.0" Enter || die "could not submit message to $m"
-          entered=1
-        fi
-      elif ((entered)) && [[ $draft == "$before_draft" || -z $draft || $draft == 'Ask Codex to do anything' ]]; then
-        cleared=$((cleared + 1))
-        if ((cleared >= 2)) && harness_alive "$m"; then
-          say "sent message to $m (accepted by harness; processing receipt pending)"
-          return 0
-        fi
-      else
-        cleared=0
-      fi
-    else
-      cleared=0
     fi
   done
   printf 'hive-member: submission to %s is unconfirmed; inspect its terminal before resending\n' "$m" >&2
@@ -199,20 +152,8 @@ confirm_prompt() {
 }
 
 send_prompt() {
-  local m="$1" message="$2" buffer="hive-send-$$-$RANDOM" before before_draft ready=0
-  harness_alive "$m" || die "$m has no running agent to receive the message"
-  before=$(cat "$HIVE_ROOT/members/$m/state/last-submitted-prompt" 2>/dev/null || true)
-  # A process can be alive while its TUI is still booting or showing a dialog.
-  for _ in $(seq 40); do
-    if before_draft=$(composer "$m"); then ready=1; break; fi
-    sleep 0.25
-  done
-  ((ready)) || die "$m has no ready prompt composer; inspect its terminal"
-  printf '%s' "$message" | tmux load-buffer -b "$buffer" - || die "could not load message for $m"
-  tmux paste-buffer -d -p -r -b "$buffer" -t "=hive-$m:0.0" || die "could not paste message to $m"
-  # Let the agent finish handling the bracketed paste before submitting.
-  sleep 1
-  confirm_prompt "$m" "$message" "$before" 1 "$before_draft"
+  harness_alive "$1" || die "$1 has no running agent to receive the message"
+  python3 "${MEMBER_HELPER%/*}/hive_prompt.py" "$1" "$2"
 }
 
 cmd_wake() (

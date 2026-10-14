@@ -17,7 +17,7 @@ class DelegationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         sender = self.root / "adapter"
         sender.write_text(
-            '#!/bin/bash\nprintf "%s\\n" "$*" >>"$HIVE_ROOT/adapter-calls"\n[[ ${TEST_FAIL:-0} != 1 ]]\n'
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$HIVE_ROOT/adapter-calls"\n[[ ${TEST_FAIL:-0} != 1 ]]\n'
         )
         sender.chmod(0o755)
         self.env = dict(

@@ -40,10 +40,15 @@ Info/decision messages, including explicit passive mentions, cause zero wakes.
 The compatibility default treats an unqualified mention as a request; specify
 `--kind info` for passive information. Requests and urgent notices name recipients.
 Busy recipients queue until a normal checkpoint. Idle requests coalesce into one
-pending wake; a recognized composer guards terminal handoff. If no subsequent
-checkpoint occurs, use a deliberate wake or `hive messages flush MEMBER` once
-it is safe. There is no background dispatcher or supervisor. Offline, failed,
-unconfirmed and native-marked messages stay pending.
+pending wake; an empty composer or the exact journaled Hive draft guards terminal
+handoff. Stop schedules one bounded deferred drain for requests that arrived
+after the final tool checkpoint; there is no polling dispatcher or supervisor.
+`state/prompt-delivery.json` distinguishes queued, pasted, submitted, accepted
+and acknowledged input. A composer reset alone remains unconfirmed until the
+actual UserPromptSubmit receipt. An owned unsent draft may be submitted again
+without repasting; unrelated drafts and dialogs remain untouched. Legacy
+attempted batches without this journal require deliberate inspection before
+recovery. Offline, failed, unconfirmed and native-marked messages stay pending.
 
 Results reference a request and reach the recorded requester. They wake only if
 that request was pending before the result. Receiving a request does not resolve
@@ -59,7 +64,9 @@ Messages that do not fit remain unread. Urgent messages can go first without
 skipping earlier routine messages. Accepted IDs remain ahead of the contiguous
 cursor until it catches up. Interrupted stdout/tmux handoff can be ambiguous:
 retry preserves IDs and the hook labels possible replay; this is not exactly-once
-execution. Queues and legacy cursors survive restart.
+execution. The sender journals before paste/Enter, verifies the same session and
+pane, and requires a new matching prompt hash before reporting submission.
+Queues and legacy cursors survive restart.
 
 Subscription join captures the current sequence and offers passive bounded
 catch-up with purpose, lead, pins, open request references, recent messages and

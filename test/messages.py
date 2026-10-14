@@ -148,7 +148,11 @@ class MessageTests(unittest.TestCase):
     def test_idle_requests_coalesce_and_result_wakes_pending_requester_once(self):
         atomic(self.root / "telemetry/members/bob.json", {"status": "idle"})
         with patch("hive_messages.subprocess.run") as run:
-            run.return_value.returncode = 0
+            def acknowledge_call(args, **kwargs):
+                atomic(self.root / f"telemetry/members/{args[2]}.json", {"status": "working"})
+                import subprocess
+                return subprocess.CompletedProcess(args, 0, "acknowledged", "")
+            run.side_effect = acknowledge_call
             first = self.post("first", channel="dm", kind="request", recipients=["bob"])
             self.assertEqual(messages.dispatch(self.root, first)["sent"], ["bob"])
             second = self.post("second", channel="dm", kind="request", recipients=["bob"])
@@ -171,10 +175,11 @@ class MessageTests(unittest.TestCase):
         self.assertNotIn(first["id"], messages.state(self.root, "alice")["pending_requests"])
         self.assertIn(second["id"], messages.state(self.root, "alice")["pending_requests"])
 
-    def test_checkpoint_retires_confirmed_handoff_with_delayed_prompt_hook(self):
+    def test_checkpoint_retires_pending_handoff_with_delayed_prompt_hook(self):
         row = self.post("accepted by composer", channel="dm", kind="request", recipients=["bob"])
         with patch("hive_messages.subprocess.run") as run:
-            run.return_value.returncode = 0
+            run.return_value.returncode = 2
+            run.return_value.stderr = "processing acknowledgment pending"
             messages.dispatch(self.root, row)
         self.assertTrue((self.root / "members/bob/state/pending-wake.json").exists())
         self.deliver()
@@ -192,6 +197,87 @@ class MessageTests(unittest.TestCase):
             messages.dispatch(self.root, row, retry=True)
             self.assertEqual(run.call_args.args[0][-1], batch["text"])
         self.assertEqual(len(messages.records(self.root)), 1)
+
+    def test_no_input_failure_can_retry_without_attempt_latch(self):
+        row = self.post("first", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 3
+            run.return_value.stderr = "composer occupied; no input pasted"
+            self.assertEqual(messages.dispatch(self.root, row)["queued"], ["bob"])
+            pending = json.loads((self.root / "members/bob/state/pending-wake.json").read_text())
+            self.assertFalse(pending["attempted"])
+            run.return_value.returncode = 0
+            self.assertEqual(messages.drain(self.root, "bob")["sent"], ["bob"])
+            self.assertEqual(run.call_count, 2)
+        self.assertFalse((self.root / "members/bob/state/pending-wake.json").exists())
+
+    def test_accepted_without_ack_does_not_advance_receipts_or_repaste(self):
+        row = self.post("first", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 2
+            run.return_value.stderr = "processing acknowledgment pending"
+            messages.dispatch(self.root, row)
+            value = messages.state(self.root, "bob")
+            self.assertEqual(value["cursor"], 0)
+            self.assertNotIn(row["id"], value["request_receipts"])
+            second = self.post("second", channel="dm", kind="request", recipients=["bob"])
+            self.assertEqual(messages.dispatch(self.root, second)["queued"], ["bob"])
+            self.assertEqual(run.call_count, 1)
+
+    def test_legacy_attempted_batch_is_not_automatically_retried(self):
+        row = self.post("old", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 2
+            messages.dispatch(self.root, row)
+            messages.drain(self.root, "bob")
+            self.assertEqual(run.call_count, 1)
+
+    def test_busy_to_idle_drain_and_new_working_race(self):
+        atomic(self.root / "telemetry/members/bob.json", {"status":"working"})
+        row = self.post("late busy", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            self.assertEqual(messages.dispatch(self.root, row)["queued"], ["bob"])
+            self.assertEqual(messages.drain(self.root, "bob")["queued"], ["bob"])
+            run.assert_not_called()
+            atomic(self.root / "telemetry/members/bob.json", {"status":"idle"})
+            run.return_value.returncode = 0
+            self.assertEqual(messages.drain(self.root, "bob")["sent"], ["bob"])
+            self.assertEqual(run.call_count, 1)
+
+    def test_successful_old_batch_keeps_new_request_queued(self):
+        first = self.post("first", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            run.return_value.returncode = 3
+            messages.dispatch(self.root, first)
+            second = self.post("second", channel="dm", kind="request", recipients=["bob"])
+            run.return_value.returncode = 0
+            report = messages.dispatch(self.root, second)
+            self.assertEqual(report["queued"], ["bob"])
+            self.assertEqual(report["sent"], [])
+            self.assertNotIn(second["id"], messages.state(self.root, "bob")["request_receipts"])
+            self.assertEqual(messages.drain(self.root, "bob")["sent"], ["bob"])
+
+    def test_actual_stop_hook_drains_only_synthetic_queue(self):
+        import os
+        import subprocess
+        import time
+        atomic(self.root / "telemetry/members/bob.json", {"status":"working", "session_id":"fixture"})
+        row = self.post("late busy", channel="dm", kind="request", recipients=["bob"])
+        with patch("hive_messages.subprocess.run") as run:
+            messages.dispatch(self.root, row)
+            run.assert_not_called()
+        binary = self.root / "fake-member"
+        binary.write_text("#!/bin/sh\nprintf 'fixture send\\n' > \"$HIVE_ROOT/fake-send\"\n")
+        binary.chmod(0o755)
+        repo = Path(__file__).resolve().parents[1]
+        env = dict(os.environ, HIVE_ROOT=str(self.root), HIVE_MEMBER="bob", HIVE_SHARE=str(repo/"share"), HIVE_MEMBER_BIN=str(binary), PATH=str(repo/"bin")+":"+os.environ["PATH"])
+        subprocess.run([str(repo/"bin/hive-hook"), "claude", "Stop"], env=env, input='{"session_id":"fixture"}', text=True, check=True, capture_output=True)
+        for _ in range(100):
+            if not (self.root/"members/bob/state/pending-wake.json").exists():
+                break
+            time.sleep(0.01)
+        self.assertTrue((self.root/"fake-send").exists())
+        self.assertFalse((self.root/"members/bob/state/pending-wake.json").exists())
 
     def test_native_migration_pauses_old_adapter_and_retains_pending(self):
         atomic(self.root / "members/bob/state/transport.json", {"adapter": "native"})

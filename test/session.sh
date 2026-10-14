@@ -10,6 +10,7 @@ export HIVE_ROOT="$tmp/hive" HIVE_USER="$(id -un)" HIVE_TEST_LOG="$tmp/log"
 export HIVE_TEST_AGENT_PID=$$
 export HIVE_MEMBER=bob
 export HIVE_TEST_HOOK="$repo/bin/hive-hook"
+export HIVE_BIN_DIR="$repo/bin"
 mkdir -p "$HIVE_ROOT/members/bob/state" "$HIVE_ROOT/telemetry/members" "$HIVE_ROOT/projects" "$tmp/bin" "$tmp/share"
 printf '%s\n' '{"harness":"codex","settings":{"profile":"review","reasoning_effort":"high"},"dir":"'"$HIVE_ROOT/projects"'"}' >"$HIVE_ROOT/members/bob/state/launch.json"
 printf '%s\n' '{"session_id":"test-session","harness":"codex"}' >"$HIVE_ROOT/telemetry/members/bob.json"
@@ -19,23 +20,31 @@ if [[ $1 == has-session ]]; then [[ ${HIVE_TEST_LIVE:-0} == 1 ]]; exit; fi
 if [[ $1 == list-panes ]]; then [[ ${HIVE_TEST_LIVE:-0} == 1 ]] && printf '%s\n' "$HIVE_TEST_AGENT_PID"; exit; fi
 printf 'tmux %s\n' "$*" >>"$HIVE_TEST_LOG"
 case $1 in
-  load-buffer) cat >"$HIVE_ROOT/pending-prompt"; echo 0 >"$HIVE_ROOT/enters"; rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" ;;
+  load-buffer) cat >"$HIVE_ROOT/pending-prompt"; echo 0 >"$HIVE_ROOT/enters"; rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" "$HIVE_ROOT/composer-empty" "$HIVE_ROOT/pasted" ;;
+  paste-buffer) touch "$HIVE_ROOT/pasted" ;;
   display-message)
-    if [[ -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then echo 2
+    if [[ -f $HIVE_ROOT/pasted && -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then echo 2
     else echo 1; fi
     ;;
   capture-pane)
-    if [[ -f $HIVE_ROOT/queued-prompt ]]; then printf '› Ask Codex to do anything\n› Ask Codex to do anything\n'; exit; fi
-    if [[ -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then
+    if [[ ${HIVE_TEST_DIALOG:-0} == 1 ]]; then printf 'Old transcript\nPermission required\n'; exit; fi
+    if [[ ! -f $HIVE_ROOT/pasted || -f $HIVE_ROOT/composer-empty ]]; then printf '› Ask Codex to do anything\n› Ask Codex to do anything\n'; exit; fi
+    prefix='› '; placeholder='Ask Codex to do anything'
+    case ${HIVE_TEST_PROMPT_STYLE:-codex} in
+      claude) prefix='❯ '; placeholder='' ;;
+      claude-nbsp) prefix=$'❯\u00a0'; placeholder='' ;;
+    esac
+    if [[ -f $HIVE_ROOT/queued-prompt ]]; then printf '%s%s\n%s%s\n' "$prefix" "$placeholder" "$prefix" "$placeholder"; exit; fi
+    if [[ -f $HIVE_ROOT/pasted && -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then
       prompt=$(cat "$HIVE_ROOT/pending-prompt")
       printf 'Previous transcript output\n'
-      if [[ ${HIVE_TEST_MULTILINE:-0} == 1 ]]; then printf '› %s\n  %s\n' "${prompt%%$'\n'*}" "${prompt#*$'\n'}"
-      else printf '› %s\n  %s\n' "${prompt:0:20}" "${prompt:20}"; fi
+      if [[ ${HIVE_TEST_MULTILINE:-0} == 1 ]]; then printf '%s%s\n  %s\n' "$prefix" "${prompt%%$'\n'*}" "${prompt#*$'\n'}"
+      else printf '%s%s\n  %s\n' "$prefix" "${prompt:0:20}" "${prompt:20}"; fi
       exit
     fi
-    printf '› %s\n' "$(cat "$HIVE_ROOT/pending-prompt" 2>/dev/null || true)"
+    printf '%s%s\n' "$prefix" "$(cat "$HIVE_ROOT/pending-prompt" 2>/dev/null || true)"
     if [[ ${HIVE_TEST_DIALOG:-0} == 1 && -f $HIVE_ROOT/pending-prompt ]]; then echo 'Permission required'
-    else printf '› %s\n' "$(cat "$HIVE_ROOT/pending-prompt" 2>/dev/null || true)"; fi
+    else printf '%s%s\n' "$prefix" "$(cat "$HIVE_ROOT/pending-prompt" 2>/dev/null || true)"; fi
     ;;
   send-keys)
     n=$(cat "$HIVE_ROOT/enters"); n=$((n + 1)); echo "$n" >"$HIVE_ROOT/enters"
@@ -46,8 +55,9 @@ case $1 in
         exit
       fi
       jq -n --rawfile prompt "$HIVE_ROOT/pending-prompt" '{prompt: $prompt}' |
-        "$HIVE_TEST_HOOK" codex UserPromptSubmit >/dev/null
+        "$HIVE_TEST_HOOK" "${HIVE_TEST_HARNESS:-codex}" UserPromptSubmit >/dev/null
       printf '%s\n' "$(cat "$HIVE_ROOT/pending-prompt")" >>"$HIVE_ROOT/accepted-prompts"
+      touch "$HIVE_ROOT/composer-empty"
     fi
     ;;
 esac
@@ -94,8 +104,8 @@ printf 'renamed member wakes its original conversation in the selected project f
 printf '%s\n' '{"harness":"bash","dir":"/tmp"}' >"$HIVE_ROOT/members/bob/state/launch.json"
 printf '%s\n' '{"pid":99999,"harness":"bash","status":"idle"}' >"$HIVE_ROOT/telemetry/members/bob.json"
 HIVE_TEST_LIVE=1 "$repo/bin/hive-member" send bob 'do live task' >/dev/null
-rg -q '^tmux load-buffer -b hive-send-[0-9]+-[0-9]+ -$' "$HIVE_TEST_LOG"
-rg -q '^tmux paste-buffer -d -p -r -b hive-send-[0-9]+-[0-9]+ -t =hive-bob:0.0$' "$HIVE_TEST_LOG"
+rg -q '^tmux load-buffer -b hive-send-[0-9]+ -$' "$HIVE_TEST_LOG"
+rg -q '^tmux paste-buffer -d -p -r -b hive-send-[0-9]+ -t =hive-bob:0.0$' "$HIVE_TEST_LOG"
 rg -q '^tmux send-keys .* Enter$' "$HIVE_TEST_LOG"
 [[ $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
 printf 'live member submission confirmed by hook\n'
@@ -117,14 +127,46 @@ HIVE_TEST_LIVE=1 HIVE_TEST_WRAP=1 "$repo/bin/hive-member" send bob 'DELIVERY_WRA
 [[ $(rg -c '^tmux load-buffer' "$HIVE_TEST_LOG") == 1 && $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
 printf 'narrow terminal prompt is submitted after paste\n'
 
+for style in claude claude-nbsp; do
+  export HIVE_TEST_PROMPT_STYLE="$style" HIVE_TEST_HARNESS=claude
+  for layout in single multiline wrapped; do
+    : >"$HIVE_TEST_LOG"
+    rm -f "$HIVE_ROOT/pending-prompt"
+    message="Claude $style prompt delivered exactly once"
+    multiline=0; wrapped=0
+    [[ $layout != multiline ]] || { multiline=1; message+=$'\nSecond line remains intact.'; }
+    [[ $layout != wrapped ]] || wrapped=1
+    HIVE_TEST_LIVE=1 HIVE_TEST_MULTILINE="$multiline" HIVE_TEST_WRAP="$wrapped" \
+      "$repo/bin/hive-member" send bob "$message" >"$tmp/out"
+    [[ $(rg -c '^tmux load-buffer' "$HIVE_TEST_LOG") == 1 && $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
+    [[ $(cat "$HIVE_ROOT/pending-prompt") == "$message" ]]
+    rg -q 'submission confirmed' "$tmp/out"
+  done
+  : >"$HIVE_TEST_LOG"
+  if HIVE_TEST_LIVE=1 HIVE_TEST_ACK_DELAY_N=9999 "$repo/bin/hive-member" send bob 'Claude queued prompt' >"$tmp/out" 2>"$tmp/error"; then exit 1; else [[ $? == 2 ]]; fi
+  [[ $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
+  rg -q 'processing acknowledgment pending' "$tmp/error"
+  rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" "$HIVE_ROOT/pending-prompt"
+  rm -f "$HIVE_ROOT/members/bob/state/prompt-delivery.json"
+
+  : >"$HIVE_TEST_LOG"
+  if HIVE_TEST_LIVE=1 HIVE_TEST_DIALOG=1 "$repo/bin/hive-member" send bob 'leave the Claude dialog alone' >"$tmp/out" 2>"$tmp/error"; then
+    echo 'Claude dialog unexpectedly accepted delivery' >&2; exit 1
+  fi
+  if rg -q '^tmux (load-buffer|send-keys)' "$HIVE_TEST_LOG"; then echo 'typed into a Claude dialog' >&2; exit 1; fi
+  printf '%s composer supports single, multiline, wrapped and queued prompts; dialog untouched\n' "$style"
+done
+unset HIVE_TEST_PROMPT_STYLE HIVE_TEST_HARNESS
+
 : >"$HIVE_TEST_LOG"
-HIVE_TEST_LIVE=1 HIVE_TEST_ACK_DELAY_N=9999 "$repo/bin/hive-member" send bob 'accepted now; hook arrives later' >"$tmp/out"
+if HIVE_TEST_LIVE=1 HIVE_TEST_ACK_DELAY_N=9999 "$repo/bin/hive-member" send bob 'accepted now; hook arrives later' >"$tmp/out" 2>"$tmp/error"; then exit 1; else [[ $? == 2 ]]; fi
 [[ $(rg -c '^tmux load-buffer' "$HIVE_TEST_LOG") == 1 && $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
-rg -q 'accepted by harness; processing receipt pending' "$tmp/out"
-[[ $(cat "$HIVE_ROOT/ack-ticks") -lt 10 ]]
+rg -q 'processing acknowledgment pending' "$tmp/error"
+[[ $(cat "$HIVE_ROOT/ack-ticks") -le 41 ]]
 if rg -q 'already running' "$tmp/out"; then echo 'send result includes irrelevant running state' >&2; exit 1; fi
-printf 'accepted queued input returns promptly without waiting for a hook or resubmitting\n'
-rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks"
+printf 'accepted queued input awaits its hook without repasting or resubmitting\n'
+rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" "$HIVE_ROOT/pending-prompt"
+rm -f "$HIVE_ROOT/members/bob/state/prompt-delivery.json"
 
 : >"$HIVE_TEST_LOG"
 if HIVE_TEST_LIVE=1 HIVE_TEST_NO_ACK=1 "$repo/bin/hive-member" send bob 'Enter has not been accepted' >"$tmp/out" 2>"$tmp/error"; then
@@ -137,14 +179,14 @@ rg -q 'unconfirmed' "$tmp/error"
 printf 'unchanged composer is unconfirmed, never successful or repasted\n'
 
 : >"$HIVE_TEST_LOG"
-rm -f "$HIVE_ROOT/pending-prompt"
+rm -f "$HIVE_ROOT/pending-prompt" "$HIVE_ROOT/members/bob/state/prompt-delivery.json"
 if HIVE_TEST_LIVE=1 HIVE_TEST_NO_ACK=1 HIVE_TEST_DIALOG=1 "$repo/bin/hive-member" send bob 'retry the swallowed Enter' >"$tmp/out" 2>"$tmp/error"; then
   echo 'unconfirmed submission unexpectedly succeeded' >&2; exit 1
 else
-  [[ $? == 2 ]]
+  [[ $? == 3 ]]
 fi
 if rg -q '^tmux send-keys' "$HIVE_TEST_LOG"; then echo 'confirmed a dialog after paste' >&2; exit 1; fi
-rg -q 'unconfirmed' "$tmp/error"
+rg -q 'no ready prompt composer' "$tmp/error"
 printf 'stale receipt rejected; dialog not confirmed by transcript text\n'
 
 : >"$HIVE_TEST_LOG"

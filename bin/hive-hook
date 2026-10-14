@@ -251,6 +251,11 @@ case $event in
   Stop)
     telemetry idle
     [[ $harness == codex ]] && codex_quota
+    # A request can arrive after the final tool checkpoint. Attempt one drain
+    # outside this hook; the normal locks, working state and draft guards apply.
+    if [[ -f $nest/state/pending-wake.json ]]; then
+      (python3 "$SHARE/hive_messages.py" drain "$m" >/dev/null 2>&1) </dev/null &
+    fi
     ;;
   SessionEnd)
     telemetry ended

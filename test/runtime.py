@@ -49,7 +49,7 @@ class RuntimeTests(unittest.TestCase):
             directory = root / "bin with spaces"
             directory.mkdir()
             hook = directory / "hive-hook"
-            hook.write_text("#!/bin/bash\nexit 0\n")
+            hook.write_text("#!/usr/bin/env bash\nexit 0\n")
             hook.chmod(0o755)
             codex = root / "codex"
             codex.mkdir()
@@ -163,7 +163,7 @@ class RuntimeTests(unittest.TestCase):
             bin_dir.mkdir()
             tmux = bin_dir / "tmux"
             tmux.write_text(
-                '#!/bin/bash\ncase "$1" in has-session) exit 0;; list-panes) echo "$TEST_PID";; kill-session) touch "$HIVE_ROOT/killed";; esac\n'
+                '#!/usr/bin/env bash\ncase "$1" in has-session) exit 0;; list-panes) echo "$TEST_PID";; kill-session) touch "$HIVE_ROOT/killed";; esac\n'
             )
             tmux.chmod(0o755)
             atomic(

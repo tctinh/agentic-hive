@@ -104,3 +104,27 @@ Evidence: regression tests reproduce the old failure and verify one paste and
 one Enter for multiline and narrow input. The real Codex session submitted and
 answered multiline, long wrapped, and 28-column messages with the fix, including
 input queued during a running turn. Production member sessions were unchanged.
+
+## 2026-10-14 — blank composer rows strand pasted Codex input
+
+Observed: the installed sender captured trimmed blank continuation rows and
+rejected them before finding the active prompt. An isolated reproduction of its
+exact functions pasted once, sent zero Enters, and produced no prompt receipt.
+Room #9169 separately records four real members with the same trailing-blank
+failure on October 12. Current live pane inspection was permission-blocked.
+
+Change: read the full contiguous composer only for a journaled paste; blank
+rows cannot license a search across dialogs or unrelated output. Match every
+visible input row, refuse occupied drafts before paste, and retain hash/session/
+pane/stage across interruptions. Retrying an owned draft submits it without
+repasting. Accepted input stays pending until a new matching UserPromptSubmit
+receipt. Explicit no-input failures can queue again. Stop triggers one bounded
+deferred drain to cover a request arriving after the final tool checkpoint;
+legacy attempted batches without the journal are not automatically retried.
+
+Evidence: synthetic sender tests cover the original one-paste/zero-Enter case
+now reaching one paste/one Enter/one acknowledgment, occupied/edited drafts,
+blank/wrapped/narrow rows, dialogs, copy mode, delayed/stale ACK, duplicate IDs,
+interrupted paste/Enter, session/pane changes and working-state races. Queue
+tests include an actual Stop hook over an isolated root with a fake transport.
+These checks do not establish live rollout or recovery of existing drafts.

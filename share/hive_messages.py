@@ -893,17 +893,26 @@ def dispatch(root, row, *, retry=False):
                 capture_output=True,
                 text=True,
                 timeout=85,
+                env=dict(os.environ, HIVE_DELIVERY_REQUIRE_IDLE="1"),
             )
             if result.returncode == 0:
-                # Success means adapter handoff; the receipt remains task-open.
-                # Keep one pending wake until actual UserPromptSubmit, preventing
-                # repeated notification attempts while the TUI queues the batch.
+                # The sender now requires UserPromptSubmit, rather than a TUI
+                # reset. Receipt confirms input, never task completion.
                 with locked(path / ".message-state.lock"):
                     value = state(root, member)
                     advance(rows, value, ids)
                     reconcile(rows, member, value)
                     save_state(root, member, value)
-                report["sent"].append(member)
+                report["sent" if row["id"] in ids else "queued"].append(member)
+                clear_wake(root, member, ids)
+            elif result.returncode == 3:
+                # Explicit no-input outcome: a later idle boundary/post may
+                # retry. A pasted/accepted ambiguous batch keeps its latch.
+                with locked(path / ".wake.lock"):
+                    pending = load(path / "pending-wake.json", {"ids": []})
+                    pending["attempted"] = False
+                    atomic(path / "pending-wake.json", pending)
+                report["queued"].append(member)
             elif result.returncode == 2:
                 report["unconfirmed"][member] = result.stderr.strip() or result.stdout.strip()
             else:
@@ -915,6 +924,23 @@ def dispatch(root, row, *, retry=False):
         except (OSError, subprocess.TimeoutExpired) as error:
             report["failed"][member] = str(error)
     return report
+
+
+def drain(root, member):
+    """One bounded idle-boundary attempt, outside the lifecycle hook.
+
+    Existing pre-journal attempted batches remain untouched. The sender checks
+    the exact owned draft/session before retrying newer ambiguous attempts.
+    """
+    path = nest(root, member)
+    pending = load(path / "pending-wake.json", {"ids": []})
+    journal = load(path / "prompt-delivery.json")
+    if pending.get("attempted") and not journal:
+        return {"queued": [member]}
+    value = state(root, member)
+    row = next((r for r in records(root) if r["id"] in pending["ids"]
+                and r["sequence"] > value["cursor"] and r["id"] not in value["seen"]), None)
+    return dispatch(root, row, retry=True) if row else {"queued": []}
 
 
 def main():
@@ -932,6 +958,7 @@ def main():
             "channels",
             "channel",
             "flush",
+            "drain",
             "dispatch",
             "route",
             "pending",
@@ -1073,6 +1100,8 @@ def main():
                 )
             )
         )
+    elif args.command == "drain":
+        print(json.dumps(drain(root, args.values[0])))
     elif args.command == "flush":
         target = hive_members.resolve(root, args.values[0])
         pending = load(nest(root, target) / "pending-wake.json", {"ids": []})

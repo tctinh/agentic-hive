@@ -84,7 +84,7 @@ chmod +x "$tmp/bin/"*
 export PATH="$tmp/bin:$repo/bin:$PATH"
 "$repo/bin/hive" init >/dev/null
 "$repo/bin/hive-member" send bob 'do the next task' >/dev/null
-rg -q '^launch bob codex .* -- --profile review -c model_reasoning_effort=high resume test-session do the next task$' "$HIVE_TEST_LOG"
+rg -q '^launch bob codex .* -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects do the next task$' "$HIVE_TEST_LOG"
 printf 'cold wake delivered initial prompt\n'
 if HIVE_TEST_NO_ACK=1 "$repo/bin/hive-member" send bob 'a cold wake without acknowledgement' >"$tmp/out" 2>"$tmp/error"; then
   echo 'unconfirmed cold wake unexpectedly succeeded' >&2; exit 1
@@ -96,7 +96,7 @@ mkdir -p "$HIVE_ROOT/projects/poke"
 "$repo/bin/hive-member" configure bob --name cedar --team poke --dir "$HIVE_ROOT/projects/poke" >/dev/null
 : >"$HIVE_TEST_LOG"
 "$repo/bin/hive-member" send cedar 'continue in the saved folder' >/dev/null
-rg -q '^launch bob codex '"$HIVE_ROOT"'/projects/poke -- --profile review -c model_reasoning_effort=high resume test-session continue in the saved folder$' "$HIVE_TEST_LOG"
+rg -q '^launch bob codex '"$HIVE_ROOT"'/projects/poke -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects/poke continue in the saved folder$' "$HIVE_TEST_LOG"
 [[ ! -d $HIVE_ROOT/members/cedar ]]
 printf 'renamed member wakes its original conversation in the selected project folder\n'
 

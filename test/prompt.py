@@ -119,6 +119,35 @@ class PromptTests(unittest.TestCase):
         self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
         self.assertEqual(self.stage(), "acknowledged")
 
+    def test_captured_codex_model_footer_and_warnings(self):
+        self.terminal.footer = (
+            "  GPT-6.1-Sol xhigh · /srv/hive/projects · Work\n"
+            "  ? for shortcuts                                     ⚠ 2 warnings · f2 to view")
+        self.assertEqual(self.send()[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
+
+    def test_captured_codex_model_footer_without_shortcuts(self):
+        self.terminal.footer = (
+            "  GPT-6-Astra xhigh · /srv/hive/projects · Learn your collaboration role\n"
+            "                                                      ⚠ 2 warnings · f2 to view")
+        self.assertEqual(self.send()[0], 0)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
+
+    def test_model_footer_never_hides_an_added_user_draft(self):
+        self.terminal.footer = (
+            "  GPT-6.1-Sol xhigh · /srv/hive/projects · Work\n"
+            "  ? for shortcuts                                     ⚠ 2 warnings · f2 to view")
+        self.terminal.below_cursor = "  USER ADDITION"
+        self.assertEqual(self.send()[0], 2)
+        self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 0))
+
+    def test_directory_picker_is_not_a_composer(self):
+        rows = ["  Working directory · resume", "",
+            "› 1. Use session directory (/srv/hive/projects)",
+            "  2. Use current directory (/srv/hive/projects/debter)", "",
+            "  enter continue · esc use session · ctrl+c quit"]
+        self.assertIsNone(prompt.composer(rows, 2))
+
     def retained_old_batch(self):
         old_hash = prompt.prompt_hash(self.message)
         atomic(self.root / "members/bob/state/prompt-delivery.json", {
@@ -144,19 +173,95 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(self.terminal.draft,"UNRELATED USER DRAFT")
         self.assertEqual(self.stage(),"acknowledged")
 
-    def test_higher_cursor_and_request_receipts_cannot_retire_old_journal(self):
+    def test_higher_cursor_alone_cannot_retire_old_journal(self):
         self.retained_old_batch()
         atomic(self.root / "members/bob/state/delivery.json", {
-            "cursor":999999, "request_receipts":["fixture-one"]})
+            "cursor":999999})
         self.assertEqual(self.send("different request")[0],2)
         self.assertEqual(self.stage(),"pasted")
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+
+    def test_hook_handoff_retires_transport_without_fabricating_prompt_ack(self):
+        self.retained_old_batch()
+        atomic(self.root / "members/bob/state/delivery.json", {
+            "cursor":5, "request_receipts":["fixture-one"]})
+        self.assertEqual(self.send("different request")[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        retired=json.loads((self.root / "members/bob/state/retired-prompt-delivery.json").read_text())
+        self.assertEqual(retired['stage'],'retired')
+        self.assertEqual(retired['ids'],['fixture-one'])
+        self.assertFalse((self.root / "members/bob/state/journal-prompt-receipt.json").exists())
+
+    def test_hook_handoff_does_not_retire_or_submit_an_occupied_draft(self):
+        self.retained_old_batch()
+        atomic(self.root / "members/bob/state/delivery.json", {
+            "request_receipts":["fixture-one"]})
+        self.terminal.draft='UNRELATED OWNER DRAFT'
+        self.assertEqual(self.send("different request")[0],3)
+        self.assertEqual(self.stage(),'pasted')
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
+        self.assertFalse((self.root / "members/bob/state/retired-prompt-delivery.json").exists())
+
+    def native_history(self, *, role='user', session='fixture-session', timestamp='2026-10-14T09:32:49.205Z', text=None):
+        home=self.root/'codex'
+        path=home/'sessions'/f'rollout-fixture-session.jsonl'
+        path.parent.mkdir(parents=True,exist_ok=True)
+        rows=[{'type':'session_meta','payload':{'id':session}},
+            {'type':'response_item','timestamp':timestamp,'payload':{
+                'type':'message','role':role,'content':[{'type':'input_text','text':self.message if text is None else text}]}}]
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        cache={'session':'fixture-session','path':str(path)}
+        atomic(self.root/'members/bob/state/quota-cache.json',cache)
+        return home,cache
+
+    def test_exact_native_user_turn_recovers_overwritten_old_receipt(self):
+        self.retained_old_batch()
+        home,cache=self.native_history()
+        atomic(self.root/'telemetry/members/bob.json',{
+            'session_id':'fixture-session','status':'idle','harness':'codex'})
+        (self.root/'members/bob/state/last-submitted-prompt').write_text('960000000000000000 '+prompt.prompt_hash('later prompt'))
+        with patch.dict('os.environ',{'CODEX_HOME':str(home)}):
+            self.assertEqual(self.send('different request')[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        proof=json.loads((self.root/'members/bob/state/journal-prompt-receipt.json').read_text())
+        self.assertEqual(proof['event'],'NativeUserMessage')
+        self.assertEqual(proof['binding']['ids'],['fixture-one'])
+
+    def test_native_proof_rejects_quoted_developer_and_other_session_text(self):
+        self.retained_old_batch()
+        record=json.loads((self.root/'members/bob/state/prompt-delivery.json').read_text())
+        cases=({'role':'developer'},{'role':'assistant'}, {'session':'another-session'},
+            {'text':'quoted\n'+self.message},{'timestamp':'1990-01-01T00:00:00Z'},
+            {'timestamp':'2026-10-14T09:32:49'})
+        for case in cases:
+            with self.subTest(case=case):
+                home,cache=self.native_history(**case)
+                self.assertIsNone(prompt.native_receipt(record,cache,home))
+
+    def test_native_proof_requires_cached_session_and_codex_home_boundary(self):
+        self.retained_old_batch()
+        record=json.loads((self.root/'members/bob/state/prompt-delivery.json').read_text())
+        home,cache=self.native_history()
+        self.assertIsNotNone(prompt.native_receipt(record,cache,home))
+        self.assertIsNone(prompt.native_receipt(record,dict(cache,session='other'),home))
+        outside=self.root/'outside';(outside/'sessions').mkdir(parents=True)
+        self.assertIsNone(prompt.native_receipt(record,cache,outside))
+
+    def test_native_reconciliation_does_not_submit_an_unrelated_draft(self):
+        self.retained_old_batch()
+        home,cache=self.native_history()
+        atomic(self.root/'telemetry/members/bob.json',{
+            'session_id':'fixture-session','status':'idle','harness':'codex'})
+        self.terminal.draft='UNRELATED OWNER DRAFT'
+        with patch.dict('os.environ',{'CODEX_HOME':str(home)}):
+            self.assertEqual(self.send('different request')[0],3)
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
 
     def test_old_receipt_overwritten_by_new_prompt_stays_unconfirmed(self):
         self.retained_old_batch()
         (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + prompt.prompt_hash("another prompt"))
         atomic(self.root / "members/bob/state/delivery.json", {
-            "cursor":999999, "request_receipts":["fixture-one"]})
+            "cursor":999999})
         self.assertEqual(self.send("different request")[0],2)
         self.assertEqual(self.stage(),"pasted")
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))

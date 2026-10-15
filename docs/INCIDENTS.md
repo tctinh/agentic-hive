@@ -157,3 +157,41 @@ guarded attempt when the batch's full hash, IDs and session match its journal.
 Legacy, mismatched and busy cases remain queued. An integrated fake-terminal
 test interrupts the first paste, adds a second request, and verifies one total
 paste and one Enter for the first batch with the second request retained.
+
+## 2026-10-15 — resumed members wait at directory selection; old journals block new input
+
+Read-only capture showed Sol6 at Codex's `Working directory · resume` selector:
+its recorded conversation directory was `/srv/hive/projects`, while the member's
+configured workdir was `/srv/hive/projects/debter`. Wake passed the conversation
+ID without an explicit directory. It now passes `resume ID --cd WORKDIR`, using
+the existing configured/launch-directory selection. Codex 0.159.3's
+[resume resolver](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/tui/src/session_resume.rs)
+uses an explicit cwd override without prompting. The parser also rejects this
+selector, whose selected row uses the same arrow as a composer.
+
+Captured Codex layouts had a model/path/task footer followed by shortcut and
+warning text, with no context-percentage row. The earlier footer fixture did
+not cover that layout. The sender now recognizes that separated native footer
+block, still requiring the complete expected draft before excluding it.
+
+Legacy journals were a separate live blocker. Bounded read-only searches found
+the full old Astra and Sol6 prompt hashes and IDs in persisted user messages in
+their exact Codex sessions. Their newer single-slot hook receipts had displaced
+that evidence. On an unconfirmed journal, the sender can recover this exact
+native evidence from the member's cached transcript, within its Codex home;
+developer/tool/compacted text, another session and partial matches cannot confirm
+input. Missing history leaves the outcome unconfirmed.
+
+Worker1's old IDs had already been handed off through hooks, without a matching
+terminal prompt receipt. That does not prove terminal submission. For a
+different batch in the same session, explicit per-request handoff receipts and
+a verified empty composer can retire the obsolete transport into
+`retired-prompt-delivery.json`, without inventing an ACK or replaying it. An
+occupied draft still blocks input. This handoff also lets a newer latched batch
+reach the sender; a high Room cursor alone cannot release it.
+
+Regression fixtures cover these layouts, configured-directory arguments,
+historical exact-user evidence and rejection controls, hook retirement without
+an ACK, occupied drafts, and the queue-to-sender recovery path. They do not prove
+live delivery after deployment. A disposable native test could not create its
+separate tmux socket in the sandbox; its escalation was aborted before launch.

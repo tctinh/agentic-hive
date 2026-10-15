@@ -44,9 +44,10 @@ pending wake; an empty composer or the exact journaled Hive draft guards termina
 handoff. Stop schedules one bounded deferred drain for requests that arrived
 after the final tool checkpoint; there is no polling dispatcher or supervisor.
 `state/prompt-delivery.json` distinguishes queued, pasted, submitted, accepted
-and acknowledged input. A composer reset alone remains unconfirmed until the
-actual UserPromptSubmit receipt. An owned unsent draft may be submitted again
-without repasting; unrelated drafts and dialogs remain untouched. Legacy
+and acknowledged input. A composer reset alone remains unconfirmed; confirmation
+requires UserPromptSubmit or exact persisted native user-message evidence. An
+owned unsent draft may be submitted again without repasting; unrelated drafts
+and dialogs remain untouched. Legacy
 attempted batches without this journal require deliberate inspection before
 recovery. Offline, failed, unconfirmed and native-marked messages stay pending.
 
@@ -60,6 +61,20 @@ A later mention can retry an attempted batch only when its full text hash,
 logical IDs and current session match the sender journal. The sender verifies
 the visible owned draft again and never repastes it. An unrelated or missing
 journal leaves the attempt queued for inspection; a busy member stays queued.
+
+An overwritten hook receipt can also be recovered from an exact persisted Codex
+user message: same session metadata, complete prompt hash/IDs and a timestamp
+after the journal's previous receipt. The bounded lookup stays within the
+member's Codex session directory; quoted, developer and tool text cannot confirm
+input. When all old request IDs were instead handed off through hooks, a
+different batch may retire that obsolete transport only after verifying an
+empty composer. The old record is retained separately as `retired`, without
+claiming prompt acknowledgment. Occupied drafts and unproven outcomes remain
+protected. Restarting alone does not clear these durable records.
+
+Codex wakes pass the selected member workdir explicitly on resume so a differing
+historical cwd does not open the directory chooser. An already-open chooser
+still needs a human choice; the sender never selects a dialog option.
 
 Results reference a request and reach the recorded requester. They wake only if
 that request was pending before the result. Receiving a request does not resolve

@@ -191,7 +191,10 @@ cmd_wake() (
   if ((!fresh)) && [[ -n $sid ]]; then
     case $harness in
       claude) args+=(--resume "$sid") ;;
-      codex) args+=(resume "$sid") ;;
+      # Explicitly select the member's saved/configured directory. Without
+      # --cd, Codex asks which directory to use when the resumed session's last
+      # cwd differs; that selector cannot receive a Hive prompt.
+      codex) args+=(resume "$sid" --cd "$dir") ;;
     esac
     say "waking $m ($harness in $dir), resuming conversation $sid"
   else

@@ -302,6 +302,72 @@ class MessageTests(unittest.TestCase):
             self.assertIn(first["id"], messages.state(self.root,"bob")["request_receipts"])
             self.assertNotIn(second["id"], messages.state(self.root,"bob")["request_receipts"])
 
+    def check_hook_handoff_recovery(self, pending_old=False, occupied=False):
+        import hashlib
+        import hive_prompt
+        import subprocess
+        from prompt import Terminal
+        path = self.root / "members/bob/state"
+        atomic(self.root / "telemetry/members/bob.json", {
+            "status":"idle", "session_id":"fixture-session"})
+        first = self.post("old request", channel="dm", kind="request", recipients=["bob"])
+        old_text = messages.WRAPPER + messages.envelope(first, 8000)
+        atomic(path / "prompt-delivery.json", {
+            "hash":hashlib.sha256(old_text.strip().encode()).hexdigest(),
+            "ids":[first["id"]], "session_id":"fixture-session", "pane_id":"%7",
+            "receipt_before":"", "stage":"pasted"})
+        self.deliver()
+        second = self.post("new request", channel="dm", kind="request", recipients=["bob"])
+        new_text = messages.WRAPPER + messages.envelope(second, 8000)
+        atomic(path / "pending-wake.json", {
+            "ids":[first["id"],second["id"]] if pending_old else [second["id"]], "attempted":True,
+            "batch":{"ids":[first["id"]] if pending_old else [second["id"]],
+                "text":old_text if pending_old else new_text}})
+        terminal = Terminal(self.root)
+        if occupied:
+            terminal.draft = 'UNRELATED OWNER DRAFT'
+        terminal.footer = ("  GPT-6.1-Sol xhigh · /srv/hive/projects · Work\n"
+            "  ? for shortcuts                                     ⚠ 2 warnings · f2 to view")
+        def transport(args, **kwargs):
+            code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
+            return subprocess.CompletedProcess(args, code, detail if code == 0 else "", detail if code else "")
+        with patch("hive_messages.subprocess.run", side_effect=transport):
+            report = messages.dispatch(self.root, second)
+        if occupied:
+            self.assertEqual(report["queued"], ["bob"])
+            self.assertEqual((terminal.pastes, terminal.enters), (0, 0))
+            self.assertIn(second["id"],json.loads((path / "pending-wake.json").read_text())["ids"])
+            self.assertFalse((path / "retired-prompt-delivery.json").exists())
+            return
+        self.assertEqual(report["sent"], ["bob"])
+        self.assertEqual((terminal.pastes, terminal.enters), (1, 1))
+        retired = json.loads((path / "retired-prompt-delivery.json").read_text())
+        self.assertEqual(retired["stage"], "retired")
+        self.assertEqual(retired["ids"], [first["id"]])
+        self.assertIn(second["id"], messages.state(self.root,"bob")["request_receipts"])
+        self.assertFalse((path / "pending-wake.json").exists())
+
+    def test_hook_handoff_releases_stale_journal_and_latched_new_batch(self):
+        self.check_hook_handoff_recovery()
+
+    def test_hook_handoff_prunes_an_already_received_old_batch_before_new_send(self):
+        self.check_hook_handoff_recovery(pending_old=True)
+
+    def test_hook_handoff_queue_recovery_preserves_an_unrelated_draft(self):
+        self.check_hook_handoff_recovery(pending_old=True,occupied=True)
+
+    def test_handoff_latch_release_requires_all_ids_and_same_session(self):
+        path = self.root / "members/bob/state"
+        value = messages.state(self.root,"bob")
+        value["cursor"] = 99999
+        value["request_receipts"] = ["old-one"]
+        messages.save_state(self.root,"bob",value)
+        atomic(path / "prompt-delivery.json", {"session_id":"fixture", "ids":["old-one","old-two"]})
+        self.assertFalse(messages.journal_handed_off(path,{"session_id":"fixture"}))
+        atomic(path / "prompt-delivery.json", {"session_id":"fixture", "ids":["old-one"]})
+        self.assertFalse(messages.journal_handed_off(path,{"session_id":"another"}))
+        self.assertTrue(messages.journal_handed_off(path,{"session_id":"fixture"}))
+
     def test_busy_to_idle_drain_and_new_working_race(self):
         atomic(self.root / "telemetry/members/bob.json", {"status":"working"})
         row = self.post("late busy", channel="dm", kind="request", recipients=["bob"])

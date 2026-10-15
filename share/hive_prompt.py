@@ -5,7 +5,9 @@ It never licenses input into another draft or treats a composer reset as an ACK.
 """
 import hashlib
 import json
+import mmap
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import subprocess
@@ -61,9 +63,70 @@ def record_receipt(root, member, payload):
 
 
 def proof_acknowledges(record, proof, session_id):
-    return bool(isinstance(proof, dict) and proof.get("event") == "UserPromptSubmit"
+    return bool(isinstance(proof, dict) and proof.get("event") in ("UserPromptSubmit", "NativeUserMessage")
         and proof.get("binding") == receipt_binding(record)
         and receipt_acknowledges(record, proof.get("receipt", ""), session_id))
+
+
+def native_receipt(record, cache, codex_home):
+    """Recover an overwritten receipt from an exact persisted Codex user turn.
+
+    The member's cached transcript must belong to this session and live under
+    its Codex home. Never use quoted/tool/developer text or compaction summaries
+    as submission evidence. Search is bounded; absence establishes nothing.
+    """
+    if not isinstance(record, dict) or not isinstance(cache, dict):
+        return None
+    sid = record.get("session_id")
+    ids = record.get("ids")
+    if not sid or not ids or cache.get("session") != sid:
+        return None
+    try:
+        path = Path(cache.get("path", "")).resolve(strict=True)
+        sessions = (Path(codex_home) / "sessions").resolve(strict=True)
+        if not path.is_relative_to(sessions) or not path.name.endswith(sid + ".jsonl"):
+            return None
+        with path.open("rb") as stream:
+            metadata = json.loads(stream.readline(1024 * 1024))
+            if metadata.get("type") != "session_meta" or metadata.get("payload", {}).get("id") != sid:
+                return None
+            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                end = len(data)
+                start = max(0, end - 64 * 1024 * 1024)
+                for _ in range(80):
+                    offset = data.rfind(ids[0].encode(), start, end)
+                    if offset < 0:
+                        break
+                    first = data.rfind(b"\n", start, offset) + 1
+                    last = data.find(b"\n", offset)
+                    end = first
+                    if first < start or last < 0 or last - first > 2 * 1024 * 1024:
+                        continue
+                    try:
+                        row = json.loads(data[first:last])
+                        payload = row.get("payload", {})
+                        if row.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
+                            continue
+                        # Only an entire text part can confirm the prompt. An
+                        # embedded quote or matching message ID is insufficient.
+                        for part in payload.get("content", []):
+                            text = part.get("text") if isinstance(part, dict) else None
+                            if not isinstance(text, str) or prompt_hash(text) != record.get("hash"):
+                                continue
+                            if re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", text, re.M) != ids:
+                                continue
+                            stamp = datetime.fromisoformat(row["timestamp"])
+                            if stamp.tzinfo is None:
+                                continue
+                            marker = f"{int(stamp.timestamp() * 10**9)} {record['hash']}"
+                            if receipt_acknowledges(record, marker, sid):
+                                return {"binding": receipt_binding(record), "receipt": marker,
+                                    "event": "NativeUserMessage", "path": str(path)}
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        continue
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
 
 
 def normalized(text):
@@ -71,13 +134,22 @@ def normalized(text):
 
 
 def trailing_footer(rows, cursor):
-    """Recognize only a separated status row at the terminal's bottom edge."""
+    """Recognize a separated native status block at the terminal's bottom edge."""
     last = next((i for i in range(len(rows) - 1, -1, -1) if rows[i].strip()), -1)
-    if last <= cursor or last < len(rows) - 3 or not last or rows[last - 1].strip():
+    if last <= cursor or last < len(rows) - 3:
         return None
     status = r"^ {2,}(?:[^\n]*?\s)?(?:100|[0-9]{1,2})% context left(?:\s*[·•|].*)?\s*$"
-    shortcuts = r"^ {2,}\? for shortcuts(?:\s*[·•|]\s*(?:100|[0-9]{1,2})% context left)?\s*$"
-    return last if re.fullmatch(status, rows[last]) or re.fullmatch(shortcuts, rows[last]) else None
+    warning = r"⚠ [0-9]+ warnings? · f2 to view"
+    shortcuts = (r"^ {2,}\? for shortcuts(?:\s*[·•|]\s*(?:100|[0-9]{1,2})% context left)?"
+                 r"(?:\s+" + warning + r")?\s*$")
+    model = r"^ {2,}GPT-\S+ (?:minimal|low|medium|high|xhigh|max|ultra)(?: · [^\n]+){2}\s*$"
+    if not any(re.fullmatch(pattern, rows[last]) for pattern in
+               (status, shortcuts, model, r"^ {2,}" + warning + r"\s*$")):
+        return None
+    start = last
+    if start > cursor + 1 and re.fullmatch(model, rows[start - 1]):
+        start -= 1
+    return start if start > cursor + 1 and not rows[start - 1].strip() else None
 
 
 def composer(rows, cursor, *, owned=False, expected=None):
@@ -88,6 +160,11 @@ def composer(rows, cursor, *, owned=False, expected=None):
     complete expected draft matches. Other below-cursor text remains input.
     """
     if not 0 <= cursor < len(rows):
+        return None
+    # A native resume selector uses the same arrow as the input box. It is a
+    # dialog, never a place to paste a prompt or confirm a directory choice.
+    if (re.match(r"^[›❯][ \u00a0][1-4]\. (?:Use|Always use) (?:session|current) directory", rows[cursor])
+        and any(row.strip() == "Working directory · resume" for row in rows[max(0, cursor - 5):cursor])):
         return None
     start = cursor
     while cursor - start < 128:
@@ -160,7 +237,8 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
     path = Path(root) / "members" / member / "state"
     journal = path / "prompt-delivery.json"
     receipt_file = path / "last-submitted-prompt"
-    identity = load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id")
+    telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
+    identity = telemetry.get("session_id")
     key = prompt_hash(message)
     ids = re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", message, re.M)
     previous = load(journal)
@@ -199,12 +277,33 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
     # A manually submitted old batch may have an exact receipt even though the
     # sender was not running to retire its journal. Check it before rejecting
     # a different incoming batch; no terminal input is licensed by this check.
+    if (previous and previous.get("stage") != "acknowledged"
+        and previous.get("session_id") == identity and not acknowledged()
+        and telemetry.get("harness") == "codex"):
+        proof = native_receipt(previous, load(path / "quota-cache.json"),
+            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        if proof:
+            atomic(path / "journal-prompt-receipt.json", proof)
     if previous and previous.get("stage") != "acknowledged" and acknowledged():
         saved("acknowledged")
     same = previous.get("hash") == key
     if previous and previous.get("stage") != "acknowledged":
+        # A hook can hand off the old request without submitting its terminal
+        # draft. That is not a prompt ACK. Retire this obsolete transport only
+        # for a different batch after verifying the current composer is empty;
+        # retain its evidence and never repaste it or erase another draft.
+        received = load(path / "delivery.json").get("request_receipts", [])
+        if (not same and previous.get("session_id") == identity
+            and previous.get("ids") and all(id in received for id in previous["ids"])):
+            draft, pane = snapshot()
+            if not empty(draft):
+                return 3, "old request reached a hook, but the composer is not empty; no input was pasted"
+            atomic(path / "retired-prompt-delivery.json", dict(previous,
+                stage="retired", reason="request handed off through hook; prompt submission unproven"))
+            previous = {}
         if not same or previous.get("session_id") != identity:
-            return 2, "another delivery is pending or the session changed; inspect its terminal"
+            if previous:
+                return 2, "another delivery is pending or the session changed; inspect its terminal"
     elif same and ids and previous.get("ids") == ids and previous.get("session_id") == identity:
         return 0, "submission already acknowledged"
     else:

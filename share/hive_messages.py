@@ -847,6 +847,18 @@ def journal_owns_batch(path, pending, telemetry):
         and journal.get("hash") == hashlib.sha256(text.strip().encode()).hexdigest())
 
 
+def journal_handed_off(path, telemetry):
+    """Old context handoff may release a latch, never assert a terminal ACK.
+
+    The sender must still verify an empty composer before retiring the old
+    journal for a different batch. A high Room cursor alone is insufficient.
+    """
+    journal = load(path / "prompt-delivery.json")
+    received = load(path / "delivery.json").get("request_receipts", [])
+    return bool(journal.get("session_id") and journal.get("session_id") == telemetry.get("session_id")
+        and journal.get("ids") and all(id in received for id in journal["ids"]))
+
+
 def dispatch(root, row, *, retry=False):
     """Coalesce idle wake work; busy/offline/native recipients remain queued.
 
@@ -875,11 +887,19 @@ def dispatch(root, row, *, retry=False):
             if row["sequence"] <= value["cursor"] or row["id"] in value["seen"]:
                 continue
             pending = load(path / "pending-wake.json", {"ids": [], "attempted": False})
+            # A hook can accept this batch while its sender is interrupted.
+            # Prune only IDs already handed off by the message state; this
+            # neither acknowledges nor submits any retained terminal draft.
+            handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in value["seen"]}
+            pending["ids"] = [id for id in pending["ids"] if id not in handed]
+            if pending.get("batch") and all(id in handed for id in pending["batch"]["ids"]):
+                pending.pop("batch")
+                pending["attempted"] = False
             pending["ids"] = list(dict.fromkeys([*pending["ids"], row["id"]]))
             telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
             busy = telemetry.get("status") == "working"
             latched = pending["attempted"] and not retry
-            if latched and journal_owns_batch(path, pending, telemetry):
+            if latched and (journal_owns_batch(path, pending, telemetry) or journal_handed_off(path, telemetry)):
                 latched = False
             if adapter(root, member) != "hooks" or busy or latched:
                 atomic(path / "pending-wake.json", pending)

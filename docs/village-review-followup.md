@@ -1,5 +1,10 @@
 # Independent review corrections and pilot assessment
 
+This records `7bc1845`. Re-review showed its 0.5-second timing margin was not
+reliable. The subsequent cache, deadline and receipt work is documented in
+[delivery-deadlines.md](delivery-deadlines.md), which supersedes the timing and
+pilot assessment below.
+
 This follows review of `1f49eb9`. Work remains in the isolated village branch;
 the original dirty checkout, configured service and active members were not
 changed. Nothing was deployed, pushed or merged.

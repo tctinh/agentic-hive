@@ -130,16 +130,32 @@ def decode_records(data, previous=0):
     return result, offset
 
 
-def records(root, recover=False, snapshot=None):
+def records(root, recover=False, snapshot=None, cache=False, member=None, cursor=0):
     path = Path(root) / "messages.jsonl"
     if not path.exists():
         return []
+    # Delivery paths may build a disposable index. Deliberate reads never opt
+    # in, so discovery/history keep their read-only filesystem contract.
+    if cache and not recover and not (snapshot and ("prefix" in snapshot or "prefix_hash" in snapshot)):
+        import hive_logcache
+        indexed = hive_logcache.read(root, decode_records, member, cursor)
+        if indexed is not None:
+            result, token = indexed
+            if snapshot is not None:
+                snapshot.update(rows=result, **token)
+            return result
     data = path.read_bytes()
     prefix = snapshot.get("prefix") if snapshot is not None else None
-    if prefix is not None and data.startswith(prefix):
+    verified = prefix is not None and data.startswith(prefix)
+    if not verified and snapshot and "prefix_hash" in snapshot:
+        end = snapshot["offset"]
+        verified = len(data) >= end and hashlib.sha256(data[:end]).hexdigest() == snapshot["prefix_hash"]
+        if verified:
+            prefix = data[:end]
+    if verified:
         # Verify every cached prefix byte, even across inode replacement or
         # manual repair. Decode only the appended suffix, including completion
-        # of a formerly partial record. No persistent index is introduced.
+        # of a formerly partial record. This snapshot stays process-local.
         old = snapshot["rows"]
         appended, offset = decode_records(data[len(prefix):], old[-1]["sequence"] if old else 0)
         result = [*old, *appended]
@@ -152,6 +168,7 @@ def records(root, recover=False, snapshot=None):
             stream.flush()
             os.fsync(stream.fileno())
     if snapshot is not None:
+        snapshot.pop("prefix_hash", None)
         snapshot.update(prefix=data[:offset], rows=result)
     return result
 
@@ -359,6 +376,8 @@ def following(reg, member, name):
 
 
 def eligible(root, reg, row, member):
+    if row.get("_skipped"):
+        return False
     if row["sender"] == member:
         return False
     # Named delivery is independent of passive attention, including after leave.
@@ -789,7 +808,7 @@ def advance(rows, value, accepted):
     value["seen"] = sorted(seen)
 
 
-def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None):
+def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None, use_cache=True):
     """Persist an offer before output. No cursor movement until accepted.
 
     stdout is the old adapter's handoff boundary, not an execution ACK. A crash
@@ -800,9 +819,12 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
         signature = context_signature(root)
-        rows = records(root, snapshot=snapshot)
         reg = registry(root)
         value = state(root, member)
+        catchup = any(sub.get("catchup") and sub.get("following", True)
+                      for sub in subscriptions(root, reg, member).values())
+        rows = records(root, snapshot=snapshot, cache=use_cache,
+                       member=None if catchup else member, cursor=value["cursor"])
         status = request_status(rows)
         reconcile(rows, member, value, status)
         _, closed = status
@@ -931,7 +953,8 @@ def accept(root, member, offer, snapshot=None):
         # unchanged ephemeral snapshot; concurrent appends/registry edits force
         # a fresh read before merging any newer state/receipts.
         unchanged = snapshot is not None and snapshot.get("signature") == signature
-        rows = snapshot["rows"] if unchanged else records(root, snapshot=snapshot)
+        rows = snapshot["rows"] if unchanged else records(root, snapshot=snapshot, cache=True,
+                                                         member=member, cursor=value["cursor"])
         advance(rows, value, [*offer["ids"], *offer["ignored"]])
         reconcile(rows, member, value, snapshot["status"] if unchanged else None)
         value["offered"] = None
@@ -951,9 +974,9 @@ def accept(root, member, offer, snapshot=None):
 def receipt(root, member, ids):
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
-        rows = records(root)
-        reg = registry(root)
         value = state(root, member)
+        rows = records(root, cache=True, member=member, cursor=value["cursor"])
+        reg = registry(root)
         accepted = [r["id"] for r in rows if r["id"] in ids and eligible(root, reg, r, member)]
         if value.get("offered") and set(value["offered"]["ids"]) & set(accepted):
             value["offered"] = None
@@ -1302,10 +1325,18 @@ def main():
             if report["unconfirmed"]:
                 return 2
     elif args.command == "hook":
+        from hive_logcache import CacheMismatch, invalidate
         event = args.values[0]
         header = sys.stdin.read()
         snapshot = {}
-        offer = prepare(root, member, header, snapshot=snapshot)
+        try:
+            offer = prepare(root, member, header, snapshot=snapshot)
+        except CacheMismatch:
+            # A derived offset/payload must never make delivery permanently
+            # depend on a bad cache. Nothing has reached stdout at this point.
+            invalidate(root)
+            snapshot = {}
+            offer = prepare(root, member, header, snapshot=snapshot, use_cache=False)
         if offer:
             print(
                 json.dumps(

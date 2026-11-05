@@ -144,5 +144,7 @@ duplicate receipts, oldest pending-message age and request-to-handoff latency.
 Exact token accounting and live latency remain unmeasured here. Whole-log reads
 and rebuilding the compatibility view are acceptable starting tradeoffs for a
 small Hive; measure growing histories before adding a filesystem offset/cache.
-No database, broker, automatic task allocation or mandatory status reporting is
-introduced.
+There is no canonical database, broker, automatic task allocation or mandatory
+status reporting. Delivery now uses an optional rebuildable SQLite header index;
+the JSONL log and member receipts remain canonical. See
+[delivery deadlines and recovery](delivery-deadlines.md).

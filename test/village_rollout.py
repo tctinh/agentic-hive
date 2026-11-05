@@ -93,11 +93,32 @@ def main():
         merged = hive_config.merge(duplicates, desired)
         commands = [h["command"] for entry in merged["hooks"]["PostToolUse"] for h in entry["hooks"]]
         assert commands == ["/new/bin/hive-hook codex PostToolUse"]
+        # Exercise the new derived index during forward/rollback as well. The
+        # archived padding is never work, and the previous helper ignores cache files.
+        last = current.records(root)[-1]["sequence"]
+        with (root / "messages.jsonl").open("a") as stream:
+            for n in range(1, 501):
+                row = {"id":f"padding-{n}","sequence":last+n,"channel":"legacy","sender":"alice",
+                       "kind":"info","priority":"routine","sender_authority":"peer",
+                       "created_at":"2026-11-05T00:00:00+00:00","body":"archived padding "*40}
+                stream.write(json.dumps(row)+"\n")
+        assert current.prepare(root, "bob") is None
+        assert (root / ".messages-cache.sqlite3").exists()
+        indexed_log = (root / "messages.jsonl").read_bytes()
+        assert baseline.prepare(root, "bob") is None
+        (root / ".messages-cache.sqlite3").write_bytes(b"discardable damaged cache")
+        assert baseline.prepare(root, "bob") is None
+        assert current.prepare(root, "bob") is None
+        assert current.prepare(root, "bob") is None
+        assert (root / "messages.jsonl").read_bytes() == indexed_log
+        assert journal.read_bytes() == old_journal
         print(json.dumps({"forward_migration": "passed", "rollback_with_previous_helper": "passed",
                           "tombstones_removed_in_temporary_copy": removed, "forward_restore": "passed",
                           "legacy_history_preserved_passively": True, "cursor_receipts_and_journal_preserved": True,
                           "native_marker_pauses_both_versions": True, "queued_native_request_preserved": True,
                           "duplicate_owned_hook_registrations_replaced": True,
+                          "previous_helper_ignores_derived_index": True,
+                          "damaged_index_forward_rebuild": True,
                           "production_touched": False}, indent=2))
 
 

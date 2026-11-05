@@ -114,6 +114,24 @@ emit() { # additionalContext for this event
 
 # Unseen Room entries from peers, or nothing. Advances the cursor only after
 # the entries were written to stdout.
+message_helper() {
+  local action="$1" code=0 temporary marker="$nest/state/$1-delivery-error.json"
+  shift
+  # Warm delivery uses the header index. The bounded allowance also covers a
+  # cold rebuild or several simultaneous readers; it is not a success signal.
+  timeout 3s python3 "$SHARE/hive_messages.py" "$action" "$@" 2>/dev/null || code=$?
+  if ((code)); then
+    temporary=$(mktemp "$nest/state/.delivery-error.XXXXXX") || return 0
+    if jq -n --arg action "$action" --arg event "$event" --arg at "$(date --iso-8601=seconds)" \
+      --argjson code "$code" '{action:$action,event:$event,at:$at,exit_code:$code,receipt_confirmed:null}' >"$temporary"; then
+      chmod 0664 "$temporary" && mv -f "$temporary" "$marker"
+    else rm -f "$temporary"; fi
+    printf 'hive-hook: %s helper exited %s; inspect %s and delivery receipts\n' "$action" "$code" "$marker" >&2
+  else rm -f "$marker"; fi
+  # Hooks remain non-fatal to the harness. Failure is visible and durable above.
+  return 0
+}
+
 deliver() {
   local header="$1" signature
   if [[ -z $header && -f $nest/state/context-stamp ]]; then
@@ -124,7 +142,7 @@ deliver() {
   flock -n 8 || return 0
   # One delivery source. Migrated native sessions are explicitly skipped by
   # this helper; ROOM.md remains a view and is never another injector.
-  printf '%s' "$header" | timeout 0.5s python3 "$SHARE/hive_messages.py" hook "$event" 2>/dev/null || true
+  printf '%s' "$header" | message_helper hook "$event"
   flock -u 8
 }
 
@@ -238,7 +256,7 @@ case $event in
     # Preserve exact evidence for an orphaned sender journal before a later
     # prompt replaces the single receipt slot. No cursor inference or input.
     timeout 0.3s python3 "$SHARE/hive_prompt.py" record-receipt <<<"$input" 2>/dev/null || true
-    timeout 0.3s python3 "$SHARE/hive_messages.py" receipt <<<"$input" 2>/dev/null || true
+    message_helper receipt <<<"$input"
     telemetry working
     deliver "$(
       core_hint

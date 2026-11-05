@@ -175,6 +175,12 @@ No destructive migration or new service is needed. `channels.json` receives
 optional subscription `id` values and explicit leave tombstones
 `{following:false, source:"explicit"}`. Profiles, message schemas, cursors,
 prompt receipts, claims and delegation IDs remain compatible.
+Large-log delivery may create a disposable `.messages-cache.sqlite3` header
+index and its ownership/lock/WAL files. It contains no canonical work state;
+older helpers ignore it, and removal during a delivery pause loses no messages
+or receipts. Install the new `hive_logcache.py` helper together with the CLI and
+hook adapter. [The delivery revision](delivery-deadlines.md) explains ownership,
+cache fallback and the new bounded helper allowance.
 
 Before an authorized rollout, preserve the habitat and install shared helpers,
 CLI, dashboard and member instructions as one version. Use synthetic residents
@@ -191,20 +197,18 @@ boundary, not by partially overwriting active configured files.
 
 ## Limits
 
-Whole-log reads and ROOM projection still cost O(history) and can be expensive in
-large habitats; discovery is on demand, and request resolution is indexed
-per prepared batch. Complete JSONL lines are decoded in one parser pass with
-corruption checks and a precise fallback for errors. Within one hook process,
-prepare/accept may reuse an ephemeral snapshot when log/registry signatures are
-unchanged. A concurrent change forces a fresh byte read: only an exactly verified
-cached prefix permits parsing just the appended suffix; a rewrite/truncation
-forces a full parse. Partial trailing writes retain the last complete offset. Confirmed
-tmux senders always reload under the state lock before merging newer receipts.
-This change primarily reduces automatic attention and removes
-participation gates. It adds no message database, automatic archiving, cross-host
-transport or broad performance claim. See [review fixes and measured pilot gates](village-review-followup.md)
-for representative-history timings, actual adapter inspection and temporary
-migration/rollback results. Exact token counts, production latency, live native
-delivery and human usability still need a pilot. Runtime policy
+Explicit history reads, index rebuilds and ROOM projection remain linear in
+history. Delivery uses a rebuildable header/offset index and reads only selected
+bodies; ordinary discovery stays read-only. Prepare/accept may reuse an ephemeral
+snapshot with unchanged signatures. A changed prefix forces a fresh canonical
+parse; verified appends can refresh just the suffix. Confirmed tmux senders reload
+under the state lock before merging newer receipts. Nothing adds a canonical
+message database, automatic task allocation or cross-host transport.
+The previous 0.5-second allowance was unreliable on long histories. The source
+now bounds each message hook/receipt helper at 3 seconds, with durable failure
+diagnostics, and retains the same context budget. See
+[current delivery evidence and pilot gates](delivery-deadlines.md). Exact token
+counts, live production latency, native delivery and human usability still need
+a pilot. Runtime policy
 cannot itself make agents exercise judgment; the updated member instructions
 explain the available choices without requiring ceremonies.

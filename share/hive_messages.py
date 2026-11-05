@@ -859,6 +859,27 @@ def journal_handed_off(path, telemetry):
         and journal.get("ids") and all(id in received for id in journal["ids"]))
 
 
+def journal_submission_proven(path, telemetry):
+    """Let the guarded sender reconcile a confirmed, mismatched old journal."""
+    from hive_prompt import native_receipt, proof_acknowledges, receipt_acknowledges
+    journal = load(path / "prompt-delivery.json")
+    session = telemetry.get("session_id")
+    if not session or not journal or journal.get("session_id") != session:
+        return False
+    try:
+        marker = (path / "last-submitted-prompt").read_text().strip()
+    except OSError:
+        marker = ""
+    if (receipt_acknowledges(journal, marker, session)
+        or proof_acknowledges(journal, load(path / "journal-prompt-receipt.json"), session)):
+        return True
+    if telemetry.get("harness") != "codex":
+        return False
+    proof = native_receipt(journal, load(path / "quota-cache.json"),
+        os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return proof_acknowledges(journal, proof, session)
+
+
 def dispatch(root, row, *, retry=False):
     """Coalesce idle wake work; busy/offline/native recipients remain queued.
 
@@ -899,7 +920,8 @@ def dispatch(root, row, *, retry=False):
             telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
             busy = telemetry.get("status") == "working"
             latched = pending["attempted"] and not retry
-            if latched and (journal_owns_batch(path, pending, telemetry) or journal_handed_off(path, telemetry)):
+            if latched and not busy and (journal_owns_batch(path, pending, telemetry)
+                or journal_handed_off(path, telemetry) or journal_submission_proven(path, telemetry)):
                 latched = False
             if adapter(root, member) != "hooks" or busy or latched:
                 atomic(path / "pending-wake.json", pending)

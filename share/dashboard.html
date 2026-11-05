@@ -328,7 +328,7 @@
     <nav class="member-tabs" aria-label="Member status">
       <button class="active" data-member-tab="working">Working <span id="working-count"></span></button>
       <button data-member-tab="idle">Idle <span id="idle-count"></span></button>
-      <button data-member-tab="inactive">Inactive <span id="inactive-count"></span></button>
+      <button data-member-tab="inactive">Offline / unknown <span id="inactive-count"></span></button>
     </nav>
     <label class="team-filter" for="team-filter">Team <select id="team-filter" onchange="showTeam(this.value)"><option value="">All members</option></select></label>
     <div class="members" id="members"></div>
@@ -727,10 +727,10 @@ function renderMembers(all) {
   $("m-count").textContent = currentTeam ? `· ${selected.length} of ${all.length}` : `· ${all.length}`;
   const ms = selected.filter(m => currentMemberTab === "inactive" ? !["working", "idle"].includes(m.state) : m.state === currentMemberTab);
   $("members").innerHTML = ms.length ? ms.map(m => {
-    const live = m.state === "working" || m.state === "idle";
+    const live = m.running ?? (m.state === "working" || m.state === "idle");
     const last = m.last_room;
     return `<div class="m ${esc(m.state)}" data-member-card="${esc(m.member)}">
-      <div class="top"><span class="name" title="Session ${esc(m.member)}">${esc(m.name || m.member)}</span><span class="badge">${esc(m.state)}</span></div>
+      <div class="top"><span class="name" title="Session ${esc(m.member)}">${esc(m.name || m.member)}</span><span class="badge">${esc(live && m.state === "unknown" ? "running · activity unknown" : m.state)}</span></div>
       ${m.team ? `<button type="button" class="team-tag" data-team="${esc(m.team)}">@${esc(m.team)}</button>` : ''}
       <dl class="kv">
         <dt>harness</dt><dd>${esc(m.harness || "–")}</dd>
@@ -987,8 +987,11 @@ async function sendMemberAction(button) {
       if (!next.ok) continue;
       const snapshot = await next.json();
       render(snapshot);
-      const state = snapshot.members.find(m => m.member === member)?.state;
-      if (state === "working" || state === "idle") { showMemberTab(state); break; }
+      const target = snapshot.members.find(m => m.member === member);
+      const state = target?.state;
+      if (target?.running || state === "working" || state === "idle") {
+        showMemberTab(["working", "idle"].includes(state) ? state : "inactive"); break;
+      }
       if (action === "kill") showMemberTab("inactive");
     }
   } catch (err) {

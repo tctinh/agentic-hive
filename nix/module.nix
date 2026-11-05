@@ -180,7 +180,8 @@ in
         ];
         RestrictNamespaces = true;
         LockPersonality = true;
-        # Member harnesses launched here may use Node/Bun JIT compilation.
+        # Dashboard-launched Codex tools initialize V8 and need executable
+        # memory; denying it crashes codex-code-mode-host with SIGTRAP.
         MemoryDenyWriteExecute = false;
         SystemCallArchitectures = "native";
         Restart = "on-failure";

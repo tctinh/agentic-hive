@@ -455,6 +455,7 @@ def members(generation, now, room_entries):
             "team": profile["team"],
             "workdir": profile["workdir"] or launch.get("dir") or cwd or str(HIVE_ROOT / "projects"),
             "state": state,
+            "running": live_pid is not None,
             "telemetry_freshness": "recent" if last is not None and 0 <= now - last < WORKING_WINDOW else "unknown",
             "harness": harness or None,
             "pid": live_pid or t.get("pid"),

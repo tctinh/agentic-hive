@@ -168,6 +168,18 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertEqual(status, 403)
         run.assert_not_called()
 
+    def test_resumed_live_process_survives_ended_telemetry_without_faking_turn_state(self):
+        telemetry = self.root / "telemetry/members/alice.json"
+        telemetry.parent.mkdir(parents=True, exist_ok=True)
+        telemetry.write_text(json.dumps({"harness":"codex", "pid":99999, "status":"ended"}))
+        before = telemetry.read_bytes()
+        with patch.object(web, "member_panes", return_value={"alice":100}), \
+             patch.object(web, "pane_harness_pid", return_value=101):
+            alice = next(m for m in web.members(0, 0, []) if m["member"] == "alice")
+        self.assertTrue(alice["running"])
+        self.assertEqual((alice["state"],alice["pid"]),("unknown",101))
+        self.assertEqual(telemetry.read_bytes(),before)
+
     def test_stale_working_turn_keeps_guard_state_and_exposes_unknown_freshness(self):
         path=self.root/'telemetry/members/alice.json';path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text('{"status":"working","harness":"codex","last_activity":"2000-01-01T00:00:00+00:00"}')
@@ -229,8 +241,8 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertIn("@titantwoshot @atlas @alice", web.room()[0]["body"])
         self.assertFalse((self.root / "teams").exists())
         data = json.loads(web.run_hive("hive", "say", "--json", "@titantwoshot @atlas @carol peers check this", member="alice"))
-        self.assertEqual(data["sent"], ["carol"])
-        self.assertEqual(data["queued"], ["bob"])
+        self.assertEqual(data["sent"], ["bob", "carol"])
+        self.assertEqual(data["queued"], [])
 
     def test_aliases_route_prompts_lifecycle_and_terminals_to_existing_sessions(self):
         self.request("/api/member-profile", {"member": "alice", "name": "atlas"})

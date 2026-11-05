@@ -195,3 +195,33 @@ historical exact-user evidence and rejection controls, hook retirement without
 an ACK, occupied drafts, and the queue-to-sender recovery path. They do not prove
 live delivery after deployment. A disposable native test could not create its
 separate tmux socket in the sandbox; its escalation was aborted before launch.
+
+## 2026-10-15 — a running resumed member loses Terminal and Restart controls
+
+After the verified delivery build was activated, Astra's replacement Codex PID
+was alive at a normal composer, while telemetry still described the ended
+previous process. The API correctly reported activity as unknown, but the
+dashboard equated unknown activity with no running process. It showed Wake
+instead of Terminal/Restart; Wake found the already-running agent and appeared
+to do nothing.
+
+The snapshot now exposes process presence separately as `running`. Controls
+use that fact, while the badge preserves unknown activity. No telemetry is
+rewritten and no idle/working turn is inferred. The third tab names both
+offline and unknown cases. Wake/restart polling also recognizes a running
+process without waiting for a new turn hook.
+
+Live owner Room request #11413 received a matching UserPromptSubmit receipt
+and Astra's linked reply #11414 after activation of b734e1f. That establishes
+real mention submission and response; it is separate from the controls fix.
+API and actual-render regressions cover a new live PID with ended telemetry,
+stopped sessions and compatibility with older snapshots.
+
+Read-only follow-up showed Sol6's newer attempted batch differed from its old
+journal, whose exact persisted user-turn evidence was valid. The dispatcher
+latched before the sender could examine that evidence. It now also allows a
+guarded sender call for a same-session journal with a matching submission
+receipt/proof or exact native-history proof. It does not mutate that evidence
+or submit input itself; busy members and unproven legacy attempts stay queued.
+An integrated fixture verifies that quoted developer text cannot release this
+latch, then that the real old user turn permits exactly one new paste/Enter.

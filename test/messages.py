@@ -368,6 +368,49 @@ class MessageTests(unittest.TestCase):
         self.assertFalse(messages.journal_handed_off(path,{"session_id":"another"}))
         self.assertTrue(messages.journal_handed_off(path,{"session_id":"fixture"}))
 
+    def test_native_history_releases_a_mismatched_old_journal_latch(self):
+        import hashlib
+        import hive_prompt
+        import os
+        import subprocess
+        from prompt import Terminal
+        path = self.root / "members/bob/state"
+        telemetry = {"status":"idle", "session_id":"fixture-session", "harness":"codex"}
+        atomic(self.root / "telemetry/members/bob.json", telemetry)
+        old = self.post("old", channel="dm", kind="request", recipients=["bob"])
+        text = messages.WRAPPER + messages.envelope(old, 8000)
+        atomic(path / "prompt-delivery.json", {"session_id":"fixture-session", "stage":"pasted",
+            "ids":[old["id"]], "hash":hashlib.sha256(text.strip().encode()).hexdigest(),
+            "pane_id":"%1", "receipt_before":""})
+        value = messages.state(self.root,"bob")
+        value['cursor'] = old['sequence']
+        messages.save_state(self.root,"bob",value)
+        new = self.post("new", channel="dm", kind="request", recipients=["bob"])
+        body = messages.WRAPPER + messages.envelope(new, 8000)
+        atomic(path / "pending-wake.json", {"ids":[new["id"]], "attempted":True,
+            "batch":{"ids":[new["id"]], "text":body}})
+        home = self.root / 'codex'
+        transcript = home / 'sessions/rollout-fixture-session.jsonl'
+        transcript.parent.mkdir(parents=True)
+        atomic(path / "quota-cache.json", {"session":"fixture-session", "path":str(transcript)})
+        header = {'type':'session_meta','payload':{'id':'fixture-session'}}
+        turn = {'type':'response_item','timestamp':'2026-10-14T09:32:49.205Z','payload':{
+            'type':'message','role':'developer','content':[{'type':'input_text','text':text}]}}
+        terminal = Terminal(self.root)
+        def transport(args, **kwargs):
+            code, detail = hive_prompt.send(self.root,"bob",args[-1],run=terminal.run,require_idle=True)
+            return subprocess.CompletedProcess(args,code,detail if code==0 else '',detail if code else '')
+        with patch.dict(os.environ,{'CODEX_HOME':str(home)}), patch('hive_messages.subprocess.run',side_effect=transport):
+            transcript.write_text(json.dumps(header)+'\n'+json.dumps(turn)+'\n')
+            self.assertEqual(messages.dispatch(self.root,new)['queued'],['bob'])
+            self.assertEqual((terminal.pastes,terminal.enters),(0,0))
+            turn['payload']['role']='user'
+            transcript.write_text(json.dumps(header)+'\n'+json.dumps(turn)+'\n')
+            self.assertEqual(messages.dispatch(self.root,new)['sent'],['bob'])
+        self.assertEqual((terminal.pastes,terminal.enters),(1,1))
+        self.assertEqual(terminal.message,body)
+        self.assertFalse((path/'pending-wake.json').exists())
+
     def test_busy_to_idle_drain_and_new_working_race(self):
         atomic(self.root / "telemetry/members/bob.json", {"status":"working"})
         row = self.post("late busy", channel="dm", kind="request", recipients=["bob"])

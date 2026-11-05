@@ -122,6 +122,37 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertIn("member=beekeeper", room)
         self.assertIn("A note for the Room", room)
 
+    def test_channel_api_browsing_does_not_change_attention_and_posts_in_scope(self):
+        web.hive_messages.channel_edit(self.root, "alice", "create", "chase", purpose="Movement and difficulty")
+        status, data = self.request("/api/room", {"message": "@bob passive speed change", "channel": "chase", "kind": "info"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["sent"], [])
+        self.assertFalse((self.root / "sent-targets").exists())
+        before = (self.root / "channels.json").read_bytes()
+        status, board = self.get_json("/api/channels?q=movement")
+        self.assertEqual(status, 200)
+        self.assertEqual(board["channels"][0]["name"], "chase")
+        status, page = self.get_json("/api/messages?channel=chase&q=speed&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(page["messages"][0]["channel"], "chase")
+        row = page["messages"][0]
+        status, full = self.get_json("/api/messages?id=" + row["id"])
+        self.assertEqual(full["body"], row["body"])
+        self.assertEqual(before, (self.root / "channels.json").read_bytes())
+        status, data = self.request("/api/room", {"message": "@bob check speed", "channel": "chase"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["sent"], ["bob"])
+        self.assertFalse(web.hive_messages.following(web.hive_messages.registry(self.root), "bob", "chase"))
+
+    def test_channel_api_validates_ranges_and_preserves_origin_boundary(self):
+        for path in ("/api/messages?limit=0", "/api/messages?limit=101", "/api/channels?offset=-1",
+                     "/api/messages?channel=missing", "/api/messages?id=missing"):
+            self.assertEqual(self.get_json(path)[0], 400)
+        status, _ = self.request("/api/room", {"message": "no", "channel": "hive", "kind": "info"}, origin="http://evil.test")
+        self.assertEqual(status, 403)
+        for payload in ({"channel": "../bad"}, {"kind": "result"}, {"channel": 12}):
+            self.assertEqual(self.request("/api/room", {"message": "bad", **payload})[0], 400)
+
     def test_unknown_mention_never_posts(self):
         status, data = self.request("/api/room", {"message": "@missing do work"})
         self.assertEqual(status, 400)

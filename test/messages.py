@@ -470,6 +470,8 @@ class MessageTests(unittest.TestCase):
     def test_channel_join_catchup_is_bounded_and_passive(self):
         self.setup_team()
         self.post("pinned", kind="decision", message_id="pinned")
+        # A channel label alone is not an existing resident identity.
+        (self.root / "members/titantwoshot/state").mkdir(parents=True)
         messages.channel_edit(self.root, "titantwoshot", "pin", "debter/titantwoshot", pin="pinned")
         for n in range(10):
             self.post(f"historical {n}")

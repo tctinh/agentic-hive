@@ -25,8 +25,12 @@ usage:
   hive say [--channel <name>] [--kind info|request|result|decision] [--to <member>]
            [--priority routine|urgent] [--id <retry-id>] [--reply-to <request-id>]
            [--task-id <task-id>] [--json] [--room-only] <message...>
-  hive channel create|subscribe|unsubscribe|archive|reopen|pin <channel> [member]
-  hive messages read <id> | history <channel> [--since N] | channels | flush <member>
+  hive channel create <channel> --purpose <text>
+  hive channel join|leave|subscribe|unsubscribe|archive|reopen|pin <channel> [member]
+  hive village [query] [--limit N] [--offset N]
+  hive messages discover [query] | search <query> [--channel name] [--limit N]
+  hive messages read <id> | history <channel> [--since N] [--before N] [--limit N]
+  hive messages channels | pending | flush <member>
   hive room [--last N] [--since-last] [--since G]
   hive observe
   hive claim <resource> [resource...]
@@ -630,6 +634,7 @@ main() {
     delegate) cmd_delegate "$@" ;;
     message) cmd_message "$@" ;;
     messages) python3 "$MESSAGE_HELPER" "$@" ;;
+    village) python3 "$MESSAGE_HELPER" discover "$@" ;;
     channel) python3 "$MESSAGE_HELPER" channel "$@" ;;
     knowledge) cmd_knowledge "$@" ;;
     # Used by harness adapters; not part of the agent-facing surface.

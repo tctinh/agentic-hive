@@ -5,6 +5,8 @@
 
 GET /            the dashboard page (polls /api/state)
 GET /api/state   JSON snapshot of members, claims, Room and host
+GET /api/channels Deliberate channel/resident discovery with bounded pagination
+GET /api/messages Bounded conversation history/search, or full read by id
 GET /api/files   Browse projects, shared files, and member nests
 GET /api/file    Preview or download one allowed file
 GET /api/devlogs List dev-log articles in shared artifacts
@@ -57,6 +59,7 @@ BEEKEEPER_LOCK = threading.Lock()
 sys.path.insert(0, str(SHARE if (SHARE / "hive_members.py").is_file() else BIN_DIR.parent / "share"))
 import hive_members
 import hive_devlogs
+import hive_messages
 
 
 def is_beekeeper(member):
@@ -604,6 +607,7 @@ def state(viewer=None):
         "claims": claims(),
         "quota": quota(),
         "room": all_room[-ROOM_ENTRIES:],
+        "channels": hive_messages.registry(HIVE_ROOT)["channels"],
         "beekeeper_mentions": beekeeper_mentions(all_room, viewer=viewer["member"] if viewer else WEB_MEMBER),
         "viewer": viewer,
         "beekeepers": beekeeper_profiles(),
@@ -803,6 +807,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(state(viewer)), "application/json")
             except Exception as e:  # never take the page down; report instead
                 self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif path in ("/api/channels", "/api/messages"):
+            try:
+                query = parse_qs(url.query)
+                limit = int(query.get("limit", ["20"])[0])
+                if path == "/api/channels":
+                    result = hive_messages.discover(HIVE_ROOT, viewer["member"],
+                        query.get("q", [""])[0], limit=limit,
+                        offset=int(query.get("offset", ["0"])[0]))
+                elif "id" in query:
+                    result = next((r for r in hive_messages.records(HIVE_ROOT)
+                                   if r["id"] == query["id"][0]), None)
+                    if result is None:
+                        raise ValueError("message ID not found")
+                else:
+                    result = hive_messages.browse(HIVE_ROOT,
+                        channel=query.get("channel", [None])[0], query=query.get("q", [""])[0],
+                        since=int(query.get("since", ["0"])[0]),
+                        before=int(query["before"][0]) if "before" in query else None, limit=limit)
+                self._send(200, json.dumps(result), "application/json")
+            except (OSError, ValueError) as error:
+                self._send(400, json.dumps({"error": str(error)}), "application/json")
         elif path in ("/api/devlogs", "/api/devlog", "/api/devlog-media"):
             try:
                 query = parse_qs(url.query)
@@ -939,7 +964,16 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("message must be 1–12000 characters")
                     if actor_member == WEB_MEMBER:
                         run_hive("hive", "join", WEB_MEMBER)
-                    report = json.loads(run_hive("hive", "say", "--json", "-", input_text=body, member=actor_member, timeout=300))
+                    channel = req.get("channel", "hive")
+                    if not isinstance(channel, str) or not hive_messages.CHANNEL.fullmatch(channel):
+                        raise ValueError("valid channel required")
+                    options = ["--json", "--channel", channel]
+                    kind = req.get("kind")
+                    if kind is not None:
+                        if kind not in ("info", "request", "decision"):
+                            raise ValueError("invalid message kind")
+                        options += ["--kind", kind]
+                    report = json.loads(run_hive("hive", "say", *options, "-", input_text=body, member=actor_member, timeout=300))
                     self._send(200, json.dumps(report), "application/json")
                     return
                 member = req.get("member", "")

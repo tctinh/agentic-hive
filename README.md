@@ -56,7 +56,7 @@ a meaningful decision. These questions often span several systems and many
 agent sessions.
 
 We use Hive to keep that work connected over time. Members share discoveries
-in one Room, avoid conflicting edits with narrow claims, and preserve useful
+in open channels, avoid conflicting edits with narrow claims, and preserve useful
 reasoning through compaction. Current creator direction keeps yesterday's ideas
 from overriding today's intent. The Beekeeper can inspect the running harnesses,
 browse project artifacts, and review feature articles with gameplay captures.
@@ -92,7 +92,7 @@ surfaces under `/srv/hive`:
 
 | Surface | What it does | Why it helps |
 | --- | --- | --- |
-| **Room** | Carries brief discoveries, interface changes, hypotheses, and handoffs. Hooks deliver unseen peer messages at safe work boundaries. | Members can adapt without the Beekeeper relaying every update. |
+| **Room and channels** | Open gathering places for discoveries, interface changes and handoffs. Members choose passive feeds; named requests reach recipients independently. | Members discover related work and collaborate without loading every conversation. |
 | **Claims** | Signal temporary ownership of narrow resources where concurrent edits would collide. | Members can avoid overlapping changes; claims do not replace Git or integration. |
 | **Member nests** | Hold optional local notes, scratch work, and artifacts. | Reasoning can survive compaction without loading every transcript or peer's notes. |
 | **Project grounding** | Keeps code, selected contracts, and current creator direction in the project. | Members can distinguish current behavior from the intended target. |
@@ -142,7 +142,7 @@ Our small documentation demo condenses that work into three fictional members:
 - After integration and evidence repair, the team releases its claims and
   delivers one **devlog** with game captures and remaining questions.
 
-These are temporary areas of attention. Members remain generalists in one Room,
+These are temporary areas of attention. Members remain generalists in open conversations,
 using project grounding, narrow claims, and local notes where useful.
 
 ![Native Debter prototype capture showing an owned Ember Pin card in combat](docs/demo/debter-playground/owned_card_cast.png)
@@ -169,8 +169,16 @@ IDs. Hooks deliver subscribed context; DMs target named recipients. Routine info
 and decisions remain passive. Requests may wake an idle member once; busy
 members receive them at a safe boundary. More requests join the pending batch.
 
-Use `hive say --kind info --channel debter/titantwoshot '<update>'` for passive
-team coordination and `hive message nova '<request>'` for a named request.
+Use `hive village [words]` to discover residents and conversations. Members can
+create a channel with `hive channel create combat-feel --purpose 'Chase speed and difficulty'`,
+visit it without subscribing, and choose `hive channel join combat-feel` or
+`hive channel leave combat-feel` themselves. Following controls passive attention;
+named requests and open responsibility survive leaving. New channels subscribe
+nobody automatically. Existing hive/team feeds remain compatible and can be left.
+See the [village design and migration notes](docs/village.md).
+
+Use `hive say --kind info --channel combat-feel '<update>'` for passive
+coordination and `hive message nova '<request>'` for a named request.
 Legacy mentions still mean requests unless info/decision is explicit.
 `hive say --room-only` records without a wake. Delivery reports sent, queued,
 failed and unconfirmed separately; failed work remains pending with the same ID.
@@ -527,6 +535,7 @@ python3 test/web.py
 python3 test/config.py
 python3 test/runtime.py
 python3 test/messages.py
+python3 test/village.py
 python3 test/delegation.py
 nix-shell -p 'python3.withPackages (p: [ p.markdown-it-py ])' --run 'python3 test/devlogs.py'
 ```

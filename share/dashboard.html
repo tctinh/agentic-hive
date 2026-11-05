@@ -339,6 +339,14 @@
       <button class="active" id="room-tab-all" role="tab" aria-selected="true" aria-controls="room-feed-panel" data-room-tab="all">All messages</button>
       <button id="room-tab-for-you" role="tab" tabindex="-1" aria-selected="false" aria-controls="room-attention" data-room-tab="for-you">For you <span id="for-you-count"></span></button>
     </nav>
+    <div class="tools" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+      <label>Channel <select id="room-channel" onchange="chooseChannel(this.value)"><option value="">All recent messages</option></select></label>
+      <input id="channel-search" type="search" maxlength="256" aria-label="Search conversations" placeholder="Search conversations…" style="min-width:120px;flex:1">
+      <button type="button" onclick="searchChannels()">Search</button>
+      <button type="button" id="channel-older" onclick="loadChannel(true)" hidden>Older</button>
+      <button type="button" id="channel-latest" onclick="chooseChannel(currentChannel)" hidden>Latest</button>
+    </div>
+    <p class="hint" id="channel-purpose">Open conversations · choose what to read. Agents follow channels from the CLI.</p>
     <div class="attention" id="room-attention" role="tabpanel" aria-labelledby="room-tab-for-you" hidden></div>
     <div class="room-scroll" id="room-feed-panel" role="tabpanel" aria-labelledby="room-tab-all"><div class="room" id="room" role="log" aria-label="Room messages" aria-live="off"></div>
       <button class="jump-latest" id="jump-latest" onclick="jumpToLatest()" hidden>↓ Latest messages</button></div>
@@ -350,6 +358,7 @@
       </div>
       <div class="recipients" id="room-recipients">Room only · mention a member to send them a prompt</div>
       <div class="tools">
+        <label>Post as <select id="room-kind"><option value="">Auto: mentions request action</option><option value="info">Info: passive, even with mentions</option><option value="decision">Decision: passive</option><option value="request">Request: named recipients</option></select></label>
         <span class="hint">Enter to send · Shift+Enter for a new line</span>
         <button class="primary" id="room-send" onclick="sendRoomMessage()">Send</button>
       </div>
@@ -496,6 +505,9 @@ let memberTabChosen = false;
 let unseenRoom = 0;
 let replyTo = null;
 let renderedRoomKey = null;
+let currentChannel = "", channelQuery = "", channelEntries = [], channelBefore = null;
+let channelRequest = 0, channelGeneration = null;
+let channelViewingOlder = false;
 let currentFolder = "";
 let filesLoaded = false;
 let folderRequest = 0;
@@ -857,6 +869,79 @@ async function markRoomDone(button) {
   } finally { button.disabled = false; }
 }
 
+function scopedRoom() { return Boolean(currentChannel || channelQuery); }
+
+function chooseChannel(name) {
+  currentChannel = name;
+  channelEntries = []; channelBefore = null; channelGeneration = null;
+  channelViewingOlder = false;
+  channelRequest++; renderedRoomKey = null;
+  $("channel-older").hidden = true;
+  $("channel-latest").hidden = true;
+  if (scopedRoom()) loadChannel();
+  if (dashboardData) render(dashboardData);
+}
+
+function searchChannels() {
+  channelQuery = $("channel-search").value.trim();
+  chooseChannel(currentChannel);
+}
+
+async function loadChannel(older = false) {
+  if (!scopedRoom()) return;
+  const request = ++channelRequest;
+  const generation = dashboardData?.generation;
+  const params = new URLSearchParams({limit: "20", q: channelQuery});
+  if (currentChannel) params.set("channel", currentChannel);
+  if (older && channelBefore) params.set("before", channelBefore);
+  channelGeneration = generation;
+  try {
+    const res = await fetch(`/api/messages?${params}`, {cache: "no-store"});
+    const data = await res.json();
+    if (request !== channelRequest) return;
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    channelEntries = data.messages.map(row => ({...row, gen: row.sequence, member: row.sender, ts: row.created_at}));
+    channelBefore = data.next_before;
+    channelViewingOlder = older;
+    $("channel-latest").hidden = !older;
+    $("channel-older").hidden = !channelBefore;
+    $("r-count").textContent = `· ${channelEntries.length} in this page`;
+    renderRoom(channelEntries, dashboardData?.members || []);
+  } catch (err) {
+    if (request !== channelRequest) return;
+    $("room-feedback").classList.add("error");
+    $("room-feedback").textContent = `Could not read channel: ${err.message}`;
+  }
+}
+
+function renderChannels(d) {
+  const select = $("room-channel");
+  const channels = Object.entries(d.channels || {});
+  const key = JSON.stringify(channels);
+  if (select.dataset.key !== key) {
+    select.innerHTML = '<option value="">All recent messages</option>' + channels.map(([name, ch]) =>
+      `<option value="${esc(name)}">${esc(name)}${ch.archived ? " (archived)" : ""}</option>`).join("");
+    select.value = currentChannel;
+    select.dataset.key = key;
+  }
+  const channel = d.channels?.[currentChannel];
+  $("channel-purpose").textContent = channel ? `${channel.purpose || currentChannel} · Curator: ${channel.lead || "none"}${channel.archived ? " · Archived" : " · Open to all Hive members"}` : "Open conversations · select a channel or search. Posting here uses hive unless replying elsewhere.";
+  if (scopedRoom() && !channelViewingOlder && channelGeneration !== d.generation) loadChannel();
+}
+
+async function readFullMessage(id) {
+  const request = channelRequest;
+  try {
+    const res = await fetch(`/api/messages?id=${encodeURIComponent(id)}`, {cache: "no-store"});
+    const data = await res.json();
+    if (request !== channelRequest) return;
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    channelEntries = channelEntries.map(row => row.id === id ? {...row, body: data.body, read_full: null} : row);
+    renderedRoomKey = null;
+    renderRoom(channelEntries, dashboardData?.members || []);
+  } catch (err) { $("room-feedback").textContent = `Could not read message: ${err.message}`; }
+}
+
 function renderRoom(entries, members) {
   const list = $("room");
   const humans = humanNames();
@@ -888,7 +973,7 @@ function renderRoom(entries, members) {
         <div class="h">${mine || human ? `<span class="who" title="${esc(e.member)}">${esc(name)}</span>` : `<button class="who" type="button" data-room-member="${esc(e.member)}" title="Show ${esc(name)} in Members">${esc(name)}</button>`}
           <span class="role">${esc(role)}</span><span class="when" title="${esc(e.ts || "")}">${ago(e.ts)}</span></div>
         <div class="body">${formatRoomBody(e.body, known)}</div>
-        <div class="gen">Room #${e.gen} · <button type="button" class="reply-action" data-reply-gen="${e.gen}">Reply</button></div>
+        <div class="gen">${esc(e.channel || "legacy")} · #${e.gen} · <button type="button" class="reply-action" data-reply-gen="${e.gen}">Reply</button>${e.read_full ? ` · <button type="button" data-full-message="${esc(e.id)}">Read full message</button>` : ""}</div>
       </div></article>`;
   }).join("") : `<div class="empty">The Room is quiet.</div>`;
   renderedRoomKey = key;
@@ -946,8 +1031,10 @@ function render(d) {
       ${p.commit ? `<div class="commit"><span class="h">${esc(p.commit.hash)}</span> ${esc(p.commit.subject)} <span class="dim">· ${ago(p.commit.date)}</span></div>` : `<span class="empty">No commits yet.</span>`}
     </div>`).join("") : `<div class="empty">No Git projects found under Hive projects or member worktrees.</div>`;
 
-  $("r-count").textContent = d.room.length ? `· last ${d.room.length}` : "";
-  renderRoom(d.room, d.members);
+  renderChannels(d);
+  const entries = scopedRoom() ? channelEntries : d.room;
+  $("r-count").textContent = entries.length ? `· ${entries.length}${scopedRoom() ? " in this page" : " recent"}` : "";
+  renderRoom(entries, d.members);
   lastGen = d.generation;
 }
 
@@ -1009,7 +1096,8 @@ function updateRecipients() {
   const known = knownMentions();
   const unknown = [...names].filter(name => name !== "all" && !known.has(name));
   const preview = $("room-recipients");
-  if (unknown.length) preview.innerHTML = `<span class="feedback error">Unknown member: ${unknown.map(name => `@${esc(name)}`).join(", ")}</span>`;
+  if (["info", "decision"].includes($("room-kind").value)) preview.textContent = "Passive post · mentions do not wake agents";
+  else if (unknown.length) preview.innerHTML = `<span class="feedback error">Unknown member: ${unknown.map(name => `@${esc(name)}`).join(", ")}</span>`;
   else if (names.has("all")) preview.innerHTML = "Sending a prompt to <b>@all</b> members";
   else if ([...names].some(name => !humans.has(name))) {
     const teams=teamGroups(),recipients=new Set();
@@ -1080,7 +1168,7 @@ function focusMember(name) {
 }
 
 function startReply(gen) {
-  const post = dashboardData?.room.find(e => e.gen === Number(gen)) || dashboardData?.beekeeper_mentions?.find(e => e.gen === Number(gen));
+  const post = channelEntries.find(e => e.gen === Number(gen)) || dashboardData?.room.find(e => e.gen === Number(gen)) || dashboardData?.beekeeper_mentions?.find(e => e.gen === Number(gen));
   if (!post) return;
   showTab("overview");
   let excerpt = post.body.replace(/^> Reply to [^\n]*\n\n/, "").replace(/\s+/g, " ").replace(/@/g, "");
@@ -1088,8 +1176,8 @@ function startReply(gen) {
     const prefix = excerpt.slice(0, 480), boundary = prefix.lastIndexOf(" ");
     excerpt = (boundary > 320 ? prefix.slice(0, boundary) : prefix) + "…";
   }
-  replyTo = {gen: post.gen, member: post.member, excerpt};
-  $("reply-context").innerHTML = `<b>Replying to ${esc(memberName(post.member))} · Room #${post.gen}</b><span class="reply-excerpt">${esc(post.body.replace(/^> Reply to [^\n]*\n\n/, "").replace(/\s+/g, " "))}</span>`;
+  replyTo = {gen: post.gen, member: post.member, excerpt, channel: post.channel === "dm" ? "hive" : post.channel};
+  $("reply-context").innerHTML = `<b>Replying to ${esc(memberName(post.member))} · ${esc(post.channel || "hive")} #${post.gen}</b><span class="reply-excerpt">${esc(post.body.replace(/^> Reply to [^\n]*\n\n/, "").replace(/\s+/g, " "))}</span>`;
   $("reply-draft").hidden = false;
   $("room-message").maxLength = 12000 - `> Reply to ${post.member} · Room #${post.gen}: ${excerpt}\n\n`.length;
   const recipient=memberName(post.member);
@@ -1117,7 +1205,9 @@ async function sendRoomMessage() {
   feedback.classList.remove("error");
   feedback.textContent = "Posting…";
   try {
-    const res = await fetch("/api/room", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({message})});
+    const payload = {message, channel: replyTo?.channel || currentChannel || "hive"};
+    if ($("room-kind").value) payload.kind = $("room-kind").value;
+    const res = await fetch("/api/room", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
     field.value = "";
@@ -1127,7 +1217,7 @@ async function sendRoomMessage() {
     const failures = Object.entries(data.failed || {});
     const unconfirmed = Object.keys(data.unconfirmed || {});
     feedback.classList.toggle("error", failures.length > 0);
-    feedback.textContent = `Posted to Room${data.sent.length ? ` and submitted to ${data.sent.map(memberName).join(", ")}` : ""}.`;
+    feedback.textContent = `Posted to ${payload.channel}${data.sent.length ? ` and submitted to ${data.sent.map(memberName).join(", ")}` : ""}.`;
     if (unconfirmed.length) feedback.textContent += ` Submission unconfirmed: ${unconfirmed.map(memberName).join(", ")}. Check the member terminal before resending.`;
     if (failures.length) feedback.textContent += ` Delivery failed: ${failures.map(([name, reason]) => `${memberName(name)} (${reason})`).join(", ")}`;
     try {
@@ -1158,6 +1248,7 @@ document.addEventListener("click", async e => {
   if (b.dataset.file) return openFile(b.dataset.file);
   if (b.dataset.roomMember) return focusMember(b.dataset.roomMember);
   if (b.dataset.replyGen) return startReply(b.dataset.replyGen);
+  if (b.dataset.fullMessage) return readFullMessage(b.dataset.fullMessage);
   if (b.dataset.mention) return insertMention(b.dataset.mention);
   if (b.dataset.terminal) return openTerminal(b.dataset.terminal);
   if (b.dataset.action) return sendMemberAction(b);
@@ -1183,6 +1274,10 @@ $("room-message").addEventListener("keydown", e => {
   }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendRoomMessage(); }
 });
+$("channel-search").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); searchChannels(); }
+});
+$("room-kind").addEventListener("change", updateRecipients);
 $("room-message").addEventListener("input", () => { updateRecipients(); updateMentionOptions(); });
 $("room-message").addEventListener("click", updateMentionOptions);
 $("room-message").addEventListener("keyup", e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) updateMentionOptions(); });

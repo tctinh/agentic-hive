@@ -225,7 +225,10 @@ def save_state(root, member, value):
     os.replace(temporary, path / "last-delivered-generation")
 
 
-def resolved(rows, request, member=None):
+def resolved(rows, request, member=None, closed=None):
+    if closed is not None:
+        completed = closed.get(request["id"], set())
+        return member in completed if member else set(request.get("recipients", [])).issubset(completed)
     completed = set()
     for row in rows:
         if row.get("reply_to") != request["id"]:
@@ -241,7 +244,7 @@ def resolved(rows, request, member=None):
     return member in completed if member else set(request.get("recipients", [])).issubset(completed)
 
 
-def reconcile(rows, member, value):
+def request_status(rows):
     requests = {r["id"]: r for r in rows if r["kind"] == "request"}
     closed = {id: set() for id in requests}
     for row in rows:
@@ -256,6 +259,11 @@ def reconcile(rows, member, value):
             row["kind"] == "result" or row.get("resolution") in ("ack", "cancel")
         ):
             closed[request["id"]].add(row["sender"])
+    return requests, closed
+
+
+def reconcile(rows, member, value):
+    requests, closed = request_status(rows)
     value["pending_requests"] = [
         id
         for id, r in requests.items()
@@ -305,29 +313,127 @@ def subscriptions(root, reg, member):
     return reg["subscriptions"].get(member, {})
 
 
+def following(reg, member, name):
+    sub = reg["subscriptions"].get(member, {}).get(name)
+    # Retain the historical global feed until a member explicitly leaves it.
+    return sub.get("following", True) if sub is not None else name == "hive"
+
+
 def eligible(root, reg, row, member):
     if row["sender"] == member:
         return False
+    # Named delivery is independent of passive attention, including after leave.
+    if member in row.get("recipients", []):
+        return True
     if row["channel"] == "dm":
-        return member in row.get("recipients", [])
+        return False
     channel = reg["channels"].get(row["channel"])
     if not channel or channel.get("archived"):
         return False
+    if not following(reg, member, row["channel"]):
+        return False
     sub = subscriptions(root, reg, member).get(row["channel"])
-    return row["channel"] == "hive" or (
-        sub is not None
-        and (
-            row["sequence"] > sub["baseline"]
-            or (row["kind"] == "request" and member in row.get("recipients", []))
+    return row["channel"] == "hive" or sub is not None and row["sequence"] > sub["baseline"]
+
+
+def deliverable(root, reg, rows, row, member, closed=None):
+    return eligible(root, reg, row, member) and not (
+        row["kind"] == "request" and resolved(
+            rows, row, member if member in row.get("recipients", []) else None, closed
         )
     )
+
+
+def page_size(limit):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be 1–100")
+    return limit
+
+
+def discover(root, member, query="", *, limit=20, offset=0):
+    """Deliberate noticeboard read, derived from existing state; never subscribes."""
+    page_size(limit)
+    if offset < 0 or len(query) > 256:
+        raise ValueError("invalid discovery offset/query")
+    terms = query.casefold().split()
+    matches = lambda text: all(term in text.casefold() for term in terms)
+    reg = registry(root)
+    rows = records(root)
+    activity = {}
+    participants = {}
+    for row in rows:
+        activity[row["channel"]] = row["sequence"]
+        people = participants.setdefault(row["channel"], [])
+        if row["sender"] in people:
+            people.remove(row["sender"])
+        people.append(row["sender"])
+        participants[row["channel"]] = people[-12:]
+    channels = []
+    for name, channel in reg["channels"].items():
+        if not matches(name + " " + channel.get("purpose", "")):
+            continue
+        followers = [m for m, subs in reg["subscriptions"].items()
+                     if name in subs and subs[name].get("following", True)]
+        channels.append({"name": name, **channel, "following": following(reg, member, name),
+                         "explicit_followers": len(followers), "legacy_global": name == "hive",
+                         "participants": participants.get(name, []), "latest_sequence": activity.get(name, 0),
+                         "history": f"hive messages history {name}"})
+    channels.sort(key=lambda row: (row.get("archived", False), -row["latest_sequence"], row["name"]))
+    residents = []
+    for profile in hive_members.profiles(root):
+        task = load(nest(root, profile["member"]) / "delegation.json")
+        feeds = sorted(name for name in reg["channels"] if following(reg, profile["member"], name))
+        interests = " ".join(name + " " + reg["channels"][name].get("purpose", "") for name in feeds)
+        if matches(" ".join(str(v or "") for v in [*profile.values(), task.get("task", ""), interests])):
+            residents.append({**profile, "task": str(task.get("task", ""))[:240],
+                              "task_id": task.get("task_id"),
+                              "following": feeds[:12], "following_count": len(feeds)})
+    return {"channels": channels[offset:offset + limit], "channel_count": len(channels),
+            "residents": residents[offset:offset + limit], "resident_count": len(residents),
+            "next_offset": offset + limit if max(len(channels), len(residents)) > offset + limit else None,
+            "note": "Open within Hive's existing trust boundary. Following controls passive context; named requests are independent."}
+
+
+def browse(root, *, channel=None, query="", since=0, before=None, limit=40):
+    """Newest bounded page, in chronological order, without delivery receipts."""
+    page_size(limit)
+    if since < 0 or before is not None and before < 1 or len(query) > 256:
+        raise ValueError("invalid history range/query")
+    if channel is not None and channel != "dm" and channel not in registry(root)["channels"]:
+        raise ValueError("unknown channel")
+    terms = query.casefold().split()
+    selected = [r for r in records(root) if r["sequence"] > since
+                and (before is None or r["sequence"] < before)
+                and (channel is None or r["channel"] == channel)
+                and all(t in (r["body"] + " " + r["sender"] + " " + r["channel"]).casefold() for t in terms)]
+    items, remaining = [], MAX_CHARS
+    for row in reversed(selected[-limit:]):
+        if remaining < 1200:
+            break
+        item = {**row, "body": row["body"][:2000]}
+        if len(row.get("recipients", [])) > 12:
+            item["recipients"] = row["recipients"][:12]
+            item["recipient_count"] = len(row["recipients"])
+        while True:
+            if item["body"] != row["body"] or "recipient_count" in item:
+                item["read_full"] = f"hive messages read {row['id']}"
+            size = len(json.dumps(item, ensure_ascii=False))
+            if size <= min(3000, remaining) or not item["body"]:
+                break
+            item["body"] = item["body"][:len(item["body"]) // 2]
+        if size > remaining:
+            break
+        items.insert(0, item)
+        remaining -= size
+    return {"messages": items,
+            "next_before": items[0]["sequence"] if items and len(selected) > len(items) else None}
 
 
 def sync_profile(root, member):
     """Explicit project/team membership, separate from tasks. Old team feed removed.
 
-    Project interface subscriptions remain an owner/lead choice, not an inferred
-    role. No project is guessed from a member name or its current working folder.
+    Legacy profile feeds remain compatible. Explicit follow/leave choices take
+    precedence. No project is guessed from a name or working folder.
     """
     initialize(root)
     profile = next((r for r in hive_members.profiles(root) if r["member"] == member), {})
@@ -357,6 +463,7 @@ def sync_profile(root, member):
                     "baseline": baseline,
                     "source": "team",
                     "catchup": True,
+                    "id": str(uuid.uuid4()),
                 }
         atomic(Path(root) / "channels.json", reg)
 
@@ -381,15 +488,28 @@ def join(root, member, new=False):
 def channel_edit(root, actor, action, name, *, member=None, purpose="", lead=None, pin=None):
     if not CHANNEL.fullmatch(name):
         raise ValueError("invalid channel name")
+    if name == "dm":
+        raise ValueError("dm is reserved for named messages")
+    if not hive_members.HANDLE.fullmatch(actor) or not (
+        human(root, actor) or nest(root, actor).parent.is_dir()
+    ):
+        raise ValueError("known actor required")
+    action = {"join": "subscribe", "follow": "subscribe", "leave": "unsubscribe",
+              "unfollow": "unsubscribe"}.get(action, action)
     initialize(root)
     with locked(Path(root) / ".messages.lock"):
         reg = registry(root)
         channel = reg["channels"].get(name)
-        if not human(root, actor) and (channel is None or channel["lead"] != actor):
-            raise ValueError("channel changes require the owner or recorded lead")
+        steward = human(root, actor) or channel is not None and channel.get("lead") == actor
+        if action not in ("create", "subscribe", "unsubscribe") and not steward:
+            raise ValueError("channel curation requires the owner or recorded lead")
         if action == "create":
             if channel is not None:
                 raise ValueError("channel already exists")
+            if lead and lead != actor:
+                if not human(root, actor):
+                    raise ValueError("members create channels with themselves as curator")
+                lead = lead if human(root, lead) else hive_members.resolve(root, lead)
             reg["channels"][name] = {
                 "purpose": purpose[:1000],
                 "lead": lead or actor,
@@ -399,16 +519,23 @@ def channel_edit(root, actor, action, name, *, member=None, purpose="", lead=Non
         elif channel is None:
             raise ValueError("unknown channel")
         elif action in ("subscribe", "unsubscribe"):
-            member = hive_members.resolve(root, member)
+            member = member or actor
+            member = member if human(root, member) else hive_members.resolve(root, member)
+            if member != actor and not steward:
+                raise ValueError("members choose their own attention; only owner/lead may change others")
             subs = reg["subscriptions"].setdefault(member, {})
             if action == "unsubscribe":
-                subs.pop(name, None)
-            elif name not in subs:
+                # An explicit opt-out survives profile sync, including legacy hive.
+                subs[name] = {"following": False, "source": "explicit"}
+            elif name not in subs or not subs[name].get("following", True):
+                if channel.get("archived"):
+                    raise ValueError("channel archived; read history or ask its curator to reopen")
                 rows = records(root)
                 subs[name] = {
                     "baseline": rows[-1]["sequence"] if rows else 0,
                     "source": "explicit",
                     "catchup": True,
+                    "id": str(uuid.uuid4()),
                 }
         elif action == "archive":
             rows = records(root)
@@ -515,27 +642,6 @@ def post(
     with locked(Path(root) / ".messages.lock"):
         rows = records(root, recover=True)
         reg = registry(root)
-        if channel != "dm":
-            entry = reg["channels"].get(channel)
-            if not entry or entry.get("archived"):
-                raise ValueError("channel unknown or archived")
-            if (
-                not human(root, sender)
-                and channel != "hive"
-                and channel not in subscriptions(root, reg, sender)
-            ):
-                raise ValueError("subscribe to channel before posting")
-            if any(
-                not eligible(
-                    root,
-                    reg,
-                    {"sender": sender, "channel": channel, "sequence": 10**30},
-                    target,
-                )
-                for target in recipients
-                if not human(root, target)
-            ):
-                raise ValueError("channel recipients must subscribe; use a DM for cross-team requests")
         logical = {
             "id": message_id,
             "channel": channel,
@@ -562,6 +668,11 @@ def post(
                 raise ValueError("message ID already used for different content")
             project(root, rows)  # repair a prior interrupted compatibility projection
             return existing
+        if channel != "dm":
+            entry = reg["channels"].get(channel)
+            if not entry or entry.get("archived"):
+                raise ValueError("channel unknown or archived")
+            # Open gathering places: visiting/posting never subscribes anyone.
         if kind == "result" or resolution:
             request = next(
                 (r for r in rows if r["id"] == reply_to and r["kind"] == "request"),
@@ -650,15 +761,17 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         reg = registry(root)
         value = state(root, member)
         reconcile(rows, member, value)
+        _, closed = request_status(rows)
         # Composer-confirmed handoff may precede its prompt hook. A normal
         # checkpoint can retire that wake using the already accepted IDs.
         handed = [r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in value["seen"]]
         clear_wake(root, member, handed)
         if value.get("offered"):
             offer = value["offered"]
-            valid = all(eligible(root, reg, r, member) for r in rows if r["id"] in offer["ids"])
+            valid = all(deliverable(root, reg, rows, r, member, closed) for r in rows if r["id"] in offer["ids"])
             valid = valid and all(
-                name in subscriptions(root, reg, member) and not reg["channels"][name].get("archived")
+                following(reg, member, name) and not reg["channels"][name].get("archived")
+                and offer.get("catchup_versions", {}).get(name) == subscriptions(root, reg, member)[name].get("id", "legacy")
                 for name in offer["catchups"]
             )
             if valid:
@@ -676,11 +789,11 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
             )
             if (row["sequence"] <= value["cursor"] or row["id"] in value["seen"]) and not unread_assignment:
                 continue
-            if eligible(root, reg, row, member):
+            if deliverable(root, reg, rows, row, member, closed):
                 eligible_rows.append(row)
             else:
                 ignored.append(row["id"])
-        eligible_rows.sort(key=lambda r: (r["priority"] != "urgent", r["sequence"]))
+        eligible_rows.sort(key=lambda r: (r["priority"] != "urgent", member not in r.get("recipients", []), r["sequence"]))
         offered_ids = []
         text = ""
         count = 0
@@ -701,7 +814,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
             return True
 
         for row in eligible_rows:
-            if row["priority"] != "urgent":
+            if row["priority"] != "urgent" and member not in row.get("recipients", []):
                 continue
             if count >= max_messages or remaining < 400 or not offer_row(row):
                 break
@@ -709,15 +822,15 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         catchups = []
         for name, sub in subscriptions(root, reg, member).items():
             ch = reg["channels"].get(name, {})
-            if not sub.get("catchup") or ch.get("archived"):
+            if not sub.get("following", True) or not sub.get("catchup") or ch.get("archived"):
                 continue
             selected = [r for r in rows if r["channel"] == name and r["sequence"] <= sub["baseline"]]
-            active = [r["id"] for r in selected if r["kind"] == "request" and not resolved(rows, r)][-12:]
+            active = [r["id"] for r in selected if r["kind"] == "request" and not resolved(rows, r, closed=closed)][-12:]
             pins = [r for r in selected if r["id"] in ch.get("pins", []) and r["id"] not in offered_ids][-2:]
             recent = [
                 r
                 for r in selected
-                if r["id"] not in offered_ids and r["id"] not in value["assigned_requests"]
+                if r["id"] not in offered_ids and r["kind"] != "request"
             ][-2:]
             summaries = list(dict((r["id"], r) for r in [*pins, *recent]).values())[
                 : max(0, max_messages - count - 1)
@@ -741,12 +854,14 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         if not text and not header:
             advance(rows, value, ignored)
             save_state(root, member, value)
+            clear_wake(root, member, ignored)
             cache_if_caught_up(root, member, rows, value, signature)
             return None
         offer = {
             "ids": offered_ids,
             "ignored": ignored,
             "catchups": catchups,
+            "catchup_versions": {name: subscriptions(root, reg, member)[name].get("id", "legacy") for name in catchups},
             "text": prefix + replay + text,
             "created_at": time.time(),
         }
@@ -768,13 +883,13 @@ def accept(root, member, offer):
         reconcile(rows, member, value)
         value["offered"] = None
         save_state(root, member, value)
-    clear_wake(root, member, offer["ids"])
+    clear_wake(root, member, [*offer["ids"], *offer["ignored"]])
     if offer["catchups"]:
         with locked(Path(root) / ".messages.lock", wait=0.05):
             reg = registry(root)
             for name in offer["catchups"]:
                 sub = subscriptions(root, reg, member).get(name)
-                if sub:
+                if sub and sub.get("id", "legacy") == offer.get("catchup_versions", {}).get(name):
                     sub["catchup"] = False
             atomic(Path(root) / "channels.json", reg)
     cache_if_caught_up(root, member, rows, value, signature)
@@ -912,7 +1027,11 @@ def dispatch(root, row, *, retry=False):
             # Prune only IDs already handed off by the message state; this
             # neither acknowledges nor submits any retained terminal draft.
             handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in value["seen"]}
-            pending["ids"] = [id for id in pending["ids"] if id not in handed]
+            retired = handed | {r["id"] for r in rows
+                                if r["id"] in pending["ids"] and (
+                                    not deliverable(root, reg, rows, r, member)
+                                    or not actionable(rows, r, member))}
+            pending["ids"] = [id for id in pending["ids"] if id not in retired]
             if pending.get("batch") and all(id in handed for id in pending["batch"]["ids"]):
                 pending.pop("batch")
                 pending["attempted"] = False
@@ -930,14 +1049,15 @@ def dispatch(root, row, *, retry=False):
             pending["attempted"] = True
             atomic(path / "pending-wake.json", pending)
             if pending.get("batch") and any(
-                not eligible(root, reg, r, member) for r in rows if r["id"] in pending["batch"]["ids"]
+                not deliverable(root, reg, rows, r, member) or not actionable(rows, r, member)
+                for r in rows if r["id"] in pending["batch"]["ids"]
             ):
                 pending.pop("batch", None)
             if not pending.get("batch"):
                 context = WRAPPER
                 ids = []
                 for record in rows:
-                    if record["id"] in pending["ids"] and eligible(root, reg, record, member):
+                    if record["id"] in pending["ids"] and deliverable(root, reg, rows, record, member):
                         full = envelope(record, 10**12)
                         available = MAX_CHARS - len(context)
                         if len(full) <= MAX_CHARS - len(WRAPPER) and len(full) > available:
@@ -999,11 +1119,15 @@ def drain(root, member):
     """
     path = nest(root, member)
     pending = load(path / "pending-wake.json", {"ids": []})
+    rows = records(root)
+    stale = [r["id"] for r in rows if r["id"] in pending["ids"] and not actionable(rows, r, member)]
+    clear_wake(root, member, stale)
+    pending = load(path / "pending-wake.json", {"ids": []})
     journal = load(path / "prompt-delivery.json")
     if pending.get("attempted") and not journal:
         return {"queued": [member]}
     value = state(root, member)
-    row = next((r for r in records(root) if r["id"] in pending["ids"]
+    row = next((r for r in rows if r["id"] in pending["ids"]
                 and r["sequence"] > value["cursor"] and r["id"] not in value["seen"]), None)
     return dispatch(root, row, retry=True) if row else {"queued": []}
 
@@ -1027,6 +1151,8 @@ def main():
             "dispatch",
             "route",
             "pending",
+            "discover",
+            "search",
         ),
     )
     parser.add_argument("values", nargs="*")
@@ -1041,6 +1167,9 @@ def main():
     parser.add_argument("--room-only", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--since", type=int, default=0)
+    parser.add_argument("--before", type=int)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--purpose", default="")
     parser.add_argument("--lead")
     parser.add_argument("--pin")
@@ -1139,13 +1268,25 @@ def main():
             member,
             re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", prompt, re.M),
         )
-    elif args.command in ("read", "history"):
+    elif args.command == "discover":
+        print(json.dumps(discover(root, member, " ".join(args.values),
+                                 limit=args.limit if args.limit is not None else 20,
+                                 offset=args.offset), ensure_ascii=False))
+    elif args.command in ("search", "history"):
+        channel = args.values[0] if args.command == "history" else args.channel
+        query = " ".join(args.values) if args.command == "search" else ""
+        page = browse(root, channel=channel, query=query, since=args.since,
+                      before=args.before, limit=args.limit if args.limit is not None else 40)
+        if args.command == "history" and not args.json:
+            for row in page["messages"]:
+                print(json.dumps(row, ensure_ascii=False))
+            if page["next_before"] is not None:
+                print(f"hive: older history: hive messages history {channel} --before {page['next_before']}", file=sys.stderr)
+        else:
+            print(json.dumps(page, ensure_ascii=False))
+    elif args.command == "read":
         for row in records(root):
-            if (args.command == "read" and row["id"] == args.values[0]) or (
-                args.command == "history"
-                and row["channel"] == args.values[0]
-                and row["sequence"] > args.since
-            ):
+            if row["id"] == args.values[0]:
                 print(json.dumps(row, ensure_ascii=False))
     elif args.command == "channels":
         print(json.dumps(registry(root), indent=2))

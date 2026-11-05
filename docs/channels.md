@@ -1,5 +1,10 @@
 # Filesystem channel operation
 
+The [village implementation](village.md) adds self-service channel creation,
+following/leaving and open participation. Where the older owner/lead-only policy
+below differs, village.md describes the revised behavior. This is still source
+documentation, not confirmation of a live rollout.
+
 This describes the revised source, not a verified live installation. Verified
 public main was f3b53b7adc328e95ec78da115c83543315761202. It has ROOM lifecycle
 injection and tmux prompt delivery; the reported newer native direct-session chat

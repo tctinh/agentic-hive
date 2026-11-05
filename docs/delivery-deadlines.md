@@ -4,6 +4,10 @@ This is the current delivery design, superseding the indexed implementation in
 `e8d7096` and its timing claims. It is source implementation and isolated
 validation. The running service and original dirty checkout remain unchanged.
 
+The subsequent [pending-offer correction](offer-upgrade.md) covers old saved
+offers and restart boundaries, including the conditional migration failure
+missed by the first cache-disable rehearsal. Its validation is current.
+
 ## Integrity correction
 
 Independent review found that the persistent SQLite headers could change delivery
@@ -30,8 +34,13 @@ symlink following. This also preserves unrelated files at those paths.
 A hook can reuse its own process-local canonical snapshot when source signatures
 are unchanged. For an append it compares every prefix byte before reusing decoded
 rows, then parses the suffix. A changed prefix causes a full parse. An old indexed
-snapshot cannot be reused. Context stamps include `canonical-jsonl-v1` so a stamp
-written by the former indexed helper cannot suppress the first canonical check.
+snapshot cannot be reused. Context stamps include `canonical-jsonl-v2` so a stamp
+written by the former indexed or first cache-disable helper cannot suppress
+the first check with versioned offers.
+New offers carry a version. Unversioned or unknown-version offers are rebuilt
+from canonical history before output and cannot be accepted directly. Skipped
+IDs advance bookkeeping separately and never create request receipts. Current
+offer reuse and acceptance recheck exclusions against canonical eligibility.
 Confirmed tmux sends still reload current records under the member state lock,
 preserving concurrently accepted hook receipts.
 
@@ -98,9 +107,10 @@ untracked concurrent request or replay; wrapper success alone is never counted
 as proof. Plain UserPromptSubmit and prompts carrying a real delivery ID exercise
 the short receipt path and both history scans respectively.
 
-Final measured results are recorded in `metadata-integrity.md`, with exact commands
-and evidence filenames. Historical indexed timings in `e8d7096` are not safety
-validation for that implementation.
+The first cache-disable results are recorded in `metadata-integrity.md`; the
+current pending-offer upgrade matrix and commands are in `offer-upgrade.md`.
+Historical indexed timings in `e8d7096` are not safety validation for that
+implementation.
 
 ## Adapter, migration and rollback
 

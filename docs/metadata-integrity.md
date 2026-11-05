@@ -2,7 +2,10 @@
 
 The current design is described in [delivery deadlines](delivery-deadlines.md).
 The unsafe persistent index from `e8d7096` is disabled and removed; delivery reads
-canonical JSONL. This document records isolated regression and timing evidence.
+canonical JSONL. This document records the `d6bcf9e` regression and timing evidence.
+A later review found its pending-offer migration gap; see the current
+[pending-offer correction and results](offer-upgrade.md). The fresh-state results
+below did not cover that conditional upgrade failure.
 
 ## Exact review regressions
 

@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--event", choices=("PostToolUse", "UserPromptSubmit"), default="PostToolUse")
     parser.add_argument("--prompt-kind", choices=("plain", "transport"), default="plain",
                         help="Transport prompts include a real message ID and exercise both scans")
+    parser.add_argument("--legacy-offers", action="store_true",
+                        help="Seed an unversioned offer with a canonical request incorrectly ignored")
     args = parser.parse_args()
     source = args.source.resolve()
     sys.path.insert(0, str(source / "share"))
@@ -61,6 +63,7 @@ def main():
               "workers": args.workers, "samples": args.samples, "deadline_seconds": args.deadline,
               "cache": args.cache, "wrapper":args.wrapper,"event":args.event,
               "prompt_kind":args.prompt_kind,
+              "legacy_offers":args.legacy_offers,
               "delivery_cache_mode":"off" if hasattr(messages,"require_canonical_delivery") else "legacy-default",
               "cases": {}}
     with tempfile.TemporaryDirectory(prefix="hive-deadline-stress-") as temporary:
@@ -120,6 +123,9 @@ messages.main()
                 for member in members:
                     value = {"cursor": len(rows)-1, "seen": [], "pending_requests": [], "assigned_requests": [],
                              "request_receipts": [] if case == "unreceipted_requests" else received[member], "offered": None}
+                    if args.legacy_offers:
+                        value["offered"]={"ids":[],"ignored":[received[member][0]],"catchups":[],
+                                          "catchup_versions":{},"text":"Unversioned pending offer","created_at":0}
                     atomic(root / "members" / member / "state/delivery.json", value)
                     (root / "members" / member / "state/context-stamp").unlink(missing_ok=True)
                 processes = []
@@ -154,6 +160,9 @@ messages.main()
                         context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
                         emitted = re.findall(r"^\[hive-message id=([^\]]+)\]", context, re.M)
                     handed = set(state["request_receipts"]) | set(state["seen"])
+                    before_receipts=set() if case=="unreceipted_requests" else set(received[member])
+                    explicit_receipts={received[member][0]} if args.wrapper and args.event=="UserPromptSubmit" and args.prompt_kind=="transport" else set()
+                    unseen=sorted(set(state["request_receipts"])-before_receipts-set(emitted)-explicit_receipts)
                     seq = dict(base_sequences)
                     with path.open("rb") as stream:
                         stream.seek(max(0,path.stat().st_size-65536))
@@ -171,6 +180,7 @@ messages.main()
                     return {"sample":sample, "member":member, "exit_code":process.returncode,"helper_errors":errors,
                             "elapsed_ms":round(elapsed,2), "emitted_ids":emitted, "receipt_committed":committed,
                             "retained_offer":bool(state.get("offered")),
+                            "unseen_request_receipts":unseen,
                             "concurrent_request_tracked": "probe-"+member in state.get("assigned_requests",[])
                             if case == "concurrent_append_before_accept" else None,
                             "error":error[-240:]}
@@ -202,10 +212,11 @@ messages.main()
                 "replayed_runs":sum(bool(r.get("replayed_ids")) for r in samples),
                 "failed_followups":sum(r.get("followup_exit_code",0)!=0 or bool(r.get("followup_helper_errors")) for r in samples),
                 "untracked_requests":sum(r["concurrent_request_tracked"] is False for r in samples),
+                "unseen_request_receipts":sum(bool(r["unseen_request_receipts"]) for r in samples),
                 "max_ms":max(r["elapsed_ms"] for r in samples),"details":samples}
         print(json.dumps(result,indent=2))
         if any(case["committed"]!=case["runs"] or case["clean_exits"]!=case["runs"] or
-               any(case[key] for key in ("helper_failures","replayed_runs","failed_followups","untracked_requests"))
+               any(case[key] for key in ("helper_failures","replayed_runs","failed_followups","untracked_requests","unseen_request_receipts"))
                for case in result["cases"].values()):
             raise SystemExit(1)
 

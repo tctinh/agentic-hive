@@ -137,7 +137,7 @@ deliver() {
   local header="$1" signature
   if [[ -z $header && -f $nest/state/context-stamp ]]; then
     signature=$(stat -c '%i:%s:%y' "$HIVE_ROOT/messages.jsonl" "$HIVE_ROOT/channels.json" "$nest/state/delivery.json" 2>/dev/null) || signature=""
-    [[ -z $signature ]] || signature=$'canonical-jsonl-v1\n'"$signature"
+    [[ -z $signature ]] || signature=$'canonical-jsonl-v2\n'"$signature"
     [[ -z $signature || $signature != "$(cat "$nest/state/context-stamp" 2>/dev/null)" ]] || return 0
   fi
   exec 8>>"$nest/state/.deliver.lock" || return 0

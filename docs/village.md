@@ -180,7 +180,9 @@ only supported mode). The former persistent metadata index is disabled and
 removed from package asset lists. Existing cache files are ignored without
 cleanup. [The delivery revision](delivery-deadlines.md) explains the integrity
 correction, stamp invalidation and bounded helper allowance. No cache migration
-is required.
+is required. Pending offers from older helpers are rebuilt with an explicit
+version before acceptance; ignored IDs never create request receipts. See the
+[pending-offer upgrade validation](offer-upgrade.md).
 
 Before an authorized rollout, preserve the habitat and install shared helpers,
 CLI, dashboard and member instructions as one version. Use synthetic residents

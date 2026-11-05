@@ -77,6 +77,84 @@ class MetadataIntegrity(unittest.TestCase):
             connection.execute(sql)
         self.assertEqual(self.log.read_bytes(),self.original)
 
+    def pending_offer(self, version=None):
+        value=self.ledger()
+        value["cursor"]=4
+        offer={"ids":["row-6"],"ignored":["row-5"],"catchups":[],"catchup_versions":{},
+               "text":messages.envelope(self.rows[5],8000),"created_at":0}
+        if version is not None:
+            offer["version"]=version
+        value["offered"]=offer
+        atomic(self.root/"members/bob/state/delivery.json",value)
+        return offer
+
+    def test_old_or_unknown_offer_rebuilds_before_any_request_receipt(self):
+        for version in (None,0,999):
+            with self.subTest(version=version):
+                self.pending_offer(version)
+                offer=messages.prepare(self.root,"bob")
+                self.assertEqual(offer["version"],messages.OFFER_VERSION)
+                self.assertIn("row-5",offer["ids"])
+                self.assertNotIn("row-5",offer["ignored"])
+                self.assertIn("[hive-message id=row-5]",offer["text"])
+                self.assertNotIn("row-5",messages.state(self.root,"bob")["request_receipts"])
+                self.assertEqual(messages.state(self.root,"bob")["cursor"],4)
+                messages.accept(self.root,"bob",offer)
+                self.assertIn("row-5",messages.state(self.root,"bob")["request_receipts"])
+
+    def test_direct_accept_of_legacy_offer_is_rejected_without_ledger_changes(self):
+        offer=self.pending_offer()
+        ledger=self.root/"members/bob/state/delivery.json"
+        before=ledger.read_bytes()
+        with self.assertRaisesRegex(ValueError,"prepare again"):
+            messages.accept(self.root,"bob",offer)
+        self.assertEqual(ledger.read_bytes(),before)
+
+    def test_current_offer_with_wrong_exclusion_is_rebuilt_at_prepare(self):
+        self.pending_offer(messages.OFFER_VERSION)
+        offer=messages.prepare(self.root,"bob")
+        self.assertIn("row-5",offer["ids"])
+        self.assertNotIn("row-5",offer["ignored"])
+        self.assertNotIn("row-5",messages.state(self.root,"bob")["request_receipts"])
+
+    def test_accept_never_receipts_or_clears_wake_for_an_ignored_unseen_request(self):
+        offer=self.pending_offer(messages.OFFER_VERSION)
+        wake=self.root/"members/bob/state/pending-wake.json"
+        atomic(wake,{"ids":["row-5"],"attempted":False})
+        messages.accept(self.root,"bob",offer)
+        value=messages.state(self.root,"bob")
+        self.assertNotIn("row-5",value["request_receipts"])
+        self.assertNotIn("row-5",value["seen"])
+        self.assertEqual(value["cursor"],4)
+        self.assertEqual(json.loads(wake.read_text())["ids"],["row-5"])
+        self.assertIn("row-5",messages.prepare(self.root,"bob")["ids"])
+
+    def test_interruption_before_saving_rebuilt_offer_retains_legacy_state(self):
+        self.pending_offer()
+        ledger=self.root/"members/bob/state/delivery.json"
+        before=ledger.read_bytes()
+        with patch.object(messages,"save_state",side_effect=RuntimeError("interrupted before atomic save")):
+            with self.assertRaisesRegex(RuntimeError,"before atomic save"):
+                messages.prepare(self.root,"bob")
+        self.assertEqual(ledger.read_bytes(),before)
+        offer=messages.prepare(self.root,"bob")
+        self.assertIn("row-5",offer["ids"])
+        self.assertNotIn("row-5",messages.state(self.root,"bob")["request_receipts"])
+
+    def test_offer_upgrade_preserves_previously_accepted_other_request(self):
+        self.rows[1].update(kind="request",recipients=["bob"])
+        self.log.write_text("".join(json.dumps(row)+"\n" for row in self.rows))
+        self.pending_offer()
+        value=messages.state(self.root,"bob")
+        value["request_receipts"]=["row-2"]
+        atomic(self.root/"members/bob/state/delivery.json",value)
+        offer=messages.prepare(self.root,"bob")
+        self.assertIn("row-5",offer["ids"])
+        self.assertNotIn("row-2",offer["ids"])
+        self.assertEqual(messages.state(self.root,"bob")["request_receipts"],["row-2"])
+        messages.accept(self.root,"bob",offer)
+        self.assertEqual(set(messages.state(self.root,"bob")["request_receipts"]),{"row-2","row-5"})
+
     def test_corrupted_recipient_cannot_exclude_real_unreceived_request(self):
         self.ledger()
         self.corrupt("UPDATE messages SET recipients='[\"carol\"]' WHERE sequence=5")
@@ -219,18 +297,20 @@ hive_messages.main()
         self.assertIsNone(marker["receipt_confirmed"])
 
     def test_legacy_fast_stamp_cannot_skip_canonical_request_check(self):
-        self.ledger()
-        stamp=subprocess.check_output(["stat","-c","%i:%s:%y",str(self.log),str(self.root/"channels.json"),
-                                       str(self.root/"members/bob/state/delivery.json")],text=True)
-        path=self.root/"members/bob/state/context-stamp"
-        path.write_text(stamp)
-        run=subprocess.run([str(SOURCE/"bin/hive-hook"),"claude","PostToolUse"],
-            env=dict(os.environ,HIVE_ROOT=str(self.root),HIVE_MEMBER="bob",HIVE_DELIVERY_CACHE="off"),
-            input="{}",text=True,capture_output=True,timeout=4)
-        self.assertEqual(run.returncode,0,run.stderr)
-        self.assertIn("id=row-5]",run.stdout)
-        self.assertIn("row-5",messages.state(self.root,"bob")["request_receipts"])
-        self.assertTrue(path.read_text().startswith("canonical-jsonl-v1\n"))
+        for prefix in ("","canonical-jsonl-v1\n"):
+            with self.subTest(prefix=prefix):
+                self.ledger()
+                stamp=subprocess.check_output(["stat","-c","%i:%s:%y",str(self.log),str(self.root/"channels.json"),
+                                               str(self.root/"members/bob/state/delivery.json")],text=True)
+                path=self.root/"members/bob/state/context-stamp"
+                path.write_text(prefix+stamp)
+                run=subprocess.run([str(SOURCE/"bin/hive-hook"),"claude","PostToolUse"],
+                    env=dict(os.environ,HIVE_ROOT=str(self.root),HIVE_MEMBER="bob",HIVE_DELIVERY_CACHE="off"),
+                    input="{}",text=True,capture_output=True,timeout=4)
+                self.assertEqual(run.returncode,0,run.stderr)
+                self.assertIn("id=row-5]",run.stdout)
+                self.assertIn("row-5",messages.state(self.root,"bob")["request_receipts"])
+                self.assertTrue(path.read_text().startswith("canonical-jsonl-v2\n"))
 
 
 if __name__=='__main__':

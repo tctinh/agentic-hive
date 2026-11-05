@@ -1,178 +1,133 @@
-# Long-history delivery and durable receipt revision
+# Canonical delivery, deadlines and receipt integrity
 
-This supersedes the timing assessment of `7bc1845`. It is source implementation
-and isolated validation, not a production deployment. The running service and
-the original dirty checkout remain unchanged.
+This is the current delivery design, superseding the indexed implementation in
+`e8d7096` and its timing claims. It is source implementation and isolated
+validation. The running service and original dirty checkout remain unchanged.
 
-## What failed
+## Integrity correction
 
-The 0.5-second helper boundary could kill a hook after stdout but before durable
-acceptance. An ordinary wrapper exit hid that failure because the wrapper used
-`|| true`. A retained offer then permitted the same IDs to be replayed.
+Independent review found that the persistent SQLite headers could change delivery
+state without canonical validation. Corrupting recipients excluded a real open
+request. Turning an unrelated, unselected row into an acknowledgment falsely
+resolved that request. Reconciliation could then discard its accepted receipt,
+allowing replay after an index rebuild. Verifying selected bodies was insufficient:
+metadata used to exclude rows and resolve work was already acting as authority.
 
-The review's failures were workload-sensitive. A quiet rerun could pass, while
-the same 30,922-record fixture under four simultaneous members produced:
+The implementation takes the explicitly permitted **cache-disable path**. No
+persistent metadata index is used anywhere in delivery. `records()` decodes the
+canonical `messages.jsonl` including unselected rows before eligibility, request
+resolution, receipt reconciliation or cursor advancement. Old `cache=True` and
+`use_cache=True` Python arguments remain accepted but cannot enable the index.
+The unsafe module is removed from the source and both package asset lists.
 
-| Previous source, 0.5-second bound | Clean exits | Committed handoffs |
-| --- | ---: | ---: |
-| Unreceipted requests | 0/20 | 7/20 |
-| Append before accept | 0/20 | 0/20 |
+`HIVE_DELIVERY_CACHE=off` is the only supported mode and the default. The wrapper
+exports that default. A nonempty alternative fails before delivery-state mutation;
+its nonzero exit becomes a durable diagnostic. `hive preflight` reports the mode,
+`enabled:false`, whether it is supported and `messages.jsonl` as metadata authority.
+Old index, WAL, ownership and lock files are ignored: no reads, cleanup, rebuild or
+symlink following. This also preserves unrelated files at those paths.
 
-The probe checks the direct helper's return code, emitted IDs, current receipts,
-cursor/seen state and retained offer. It never treats the Bash wrapper's exit as
-proof. All contents are invented; the fixture matches the earlier record/kind
-counts and contains 22,522,274 bytes and 569 open requests for its first recipient.
+A hook can reuse its own process-local canonical snapshot when source signatures
+are unchanged. For an append it compares every prefix byte before reusing decoded
+rows, then parses the suffix. A changed prefix causes a full parse. An old indexed
+snapshot cannot be reused. Context stamps include `canonical-jsonl-v1` so a stamp
+written by the former indexed helper cannot suppress the first canonical check.
+Confirmed tmux sends still reload current records under the member state lock,
+preserving concurrently accepted hook receipts.
 
-## Architecture change
+`test/metadata_integrity.py` seeds the exact previous SQLite schema and corrupts
+only its headers, leaving canonical bytes unchanged. The three review cases first
+failed against `e8d7096` and now pass. Tests also cover legacy API flags, an old
+indexed snapshot, default/explicit disable mode, unsupported modes, untouched
+cache files/symlinks, a stale context stamp, no-ID prompts, timeout diagnostics
+and a forced exit between stdout and durable acceptance.
 
-Delivery paths can build `.messages-cache.sqlite3`, a disposable **header and
-byte-offset index** using Python's standard SQLite module. JSONL messages and
-member receipt files remain canonical. There is no new service, broker, planner,
-background polling loop or task authority.
+This prevents new cache-induced state damage. It cannot reconstruct a receipt
+already erased by an earlier broken helper. If such a version was used in a
+habitat, preserve state and compare original message IDs and receipt backups
+before resuming; do not infer accepted work from missing metadata.
 
-- Automatic delivery fetches current-member obligations, relevant resolution
-  headers and unread candidates. Older unrelated records need only ID/sequence
-  bookkeeping. Initial catch-up can read the full header set.
-- Bodies are fetched from the canonical log by offset only when selected for
-  context. Their raw-record hash and full metadata, including authority, must
-  match before emission. A mismatch invalidates the derived cache and retries
-  from canonical history before anything reaches stdout.
-- Source fingerprints invalidate stale indexes. A changed log prefix triggers
-  a rebuild; a verified append decodes only the new suffix. Partial trailing
-  records keep the last complete offset. Within one hook, unchanged snapshots
-  still avoid redundant work; changed snapshots preserve newer receipt state.
-- One builder coordinates cold/index refresh work. SQLite transactions and WAL
-  keep partial index writes from becoming a committed view. An interrupted
-  builder, damaged index, missing rows or unknown schema can fall back to JSONL.
-- Read-only discovery/history do not create or modify this cache. Small logs
-  bypass it. Unrelated pre-existing databases and symlinks are not adopted or
-  overwritten. A private ownership marker identifies disposable cache files.
-  Cache/journal permission tests preserve the canonical log's mode boundary.
+## Bounded latency and failure reporting
 
-The index reduces repeated body decoding and allocation. It does not make all
-history work constant-time: header bookkeeping, byte-prefix verification, cold
-rebuilds and the compatibility ROOM projection still scale with history.
+The old 0.5-second message-hook allowance killed some long-history helpers after
+stdout but before durable acceptance. Under four simultaneous members, the prior
+canonical source produced 0/40 clean exits and only 7/40 committed handoffs.
+The wrapper's historical `|| true` obscured those failures.
 
-## The deadline tradeoff
+The current source retains **3 seconds per message hook/receipt helper**, with the
+same context character budget. No timeout was increased in this integrity fix.
+`hook-delivery-error.json` or `receipt-delivery-error.json` records a nonzero exit
+and `receipt_confirmed:null`; stderr points to that record. Successful completion
+clears that phase's marker. The wrapper remains non-fatal to the harness. Its zero
+exit code alone proves neither delivery nor acceptance.
 
-The source now gives each `hive_messages.py hook` and `receipt` helper a **3-second
-bounded allowance**, replacing 0.5 and 0.3 seconds respectively. The prompt-journal
-evidence helper's separate allowance is unchanged.
+UserPromptSubmit can invoke two sequential 3-second message phases, plus the
+unchanged 0.3-second prompt-journal helper and shell/telemetry work. Thus 3 seconds
+is not an end-to-end wrapper limit; slow phases can consume roughly 6.3 seconds
+plus that other work. Ordinary human prompts without `[hive-message id=...]`
+supply no receipt evidence and now return from the receipt helper without reading
+history or modifying the ledger. The following hook phase reconciles obligations.
+Transport prompts with IDs still validate canonical history before accepting
+receipts and may then run delivery. Both paths are measured separately below.
 
-This is intentional: a cold index rebuild and concurrent readers cannot reliably
-complete in half a second on this host. The larger bound preserves receipt
-completion under tested contention; the index improves normal repeated work.
-We do **not** claim that 0.5 seconds is now a reliable operating limit.
+Canonical decoding and request bookkeeping remain linear in total history. This
+trades the unsafe index's single-reader speed benefit for a smaller authority
+surface. There is no automatic fallback to indexed delivery. A read, parse or
+lock failure leaves unaccepted work retryable and is reported by the wrapper.
+The existing strict bulk parser and in-process snapshots reduce redundant work;
+more history or contention can still exceed the allowance.
 
-A rare cold, contended or fallback call can delay a checkpoint by up to three
-seconds. UserPromptSubmit can invoke both receipt and delivery phases, so its
-combined worst-case allowance is larger; normally the first phase warms the
-shared index. No unbounded daemon or retry loop was added.
+## Validation method and results
 
-Helper failure is no longer silent. The hook records `hook-delivery-error.json`
-or `receipt-delivery-error.json` in the member state and emits an stderr diagnostic.
-The record preserves the exit code and marks receipt confirmation as **unknown**,
-not successful or failed by inference. A later successful helper clears that
-phase's error marker. Hooks remain non-fatal to the harness for compatibility.
-Inspect actual receipts and offered IDs before deciding whether to retry work.
+`test/deadline_stress.py --wrapper` invokes the actual Bash wrapper with its actual
+internal 3-second timeouts and no outer 3-second shortcut. Every run starts fresh
+Python processes. A test-only shim intercepts `accept` solely to append a named
+request between output and acceptance; the real reader and wrapper are unchanged.
 
-## Quantitative validation
+The invented fixture contains **30,922 records / 22,522,274 bytes**, with the same
+kind counts as the earlier deadline reproduction. Both unreceipted older requests
+and append-before-accept run against a shared log. Eight simultaneous members each
+have separate delivery ledgers. Warm means OS pages warmed by a canonical read;
+cold requests advisory eviction of this fixture's log pages, not a system-wide
+cache drop or physical cold boot. No persistent metadata cache is used in either.
 
-`test/deadline_stress.py` launches real helper processes against a shared synthetic
-log, drains every stdout concurrently, and inspects each member's durable state.
-The append case writes a new named request between prepare and accept under a
-test-only writer lock. Cold runs remove the index and request advisory eviction
-of this fixture's log pages; they are not system-wide cache drops or a power-cycle.
-Every sample starts fresh Python processes.
+Evidence checks every helper error marker, emitted ID, durable receipt/cursor,
+retained offer and new concurrent request. A second actual wrapper checkpoint
+checks for replay. The probe exits nonzero on any failed handoff, helper failure,
+untracked concurrent request or replay; wrapper success alone is never counted
+as proof. Plain UserPromptSubmit and prompts carrying a real delivery ID exercise
+the short receipt path and both history scans respectively.
 
-The final matrix used eight simultaneous members, five samples per case and the
-configured 3-second bound, while the regression suite was also running. All
-**160/160 calls exited cleanly, emitted context and committed their receipts**,
-with no retained offers. Every concurrent new request remained tracked.
+Final measured results are recorded in `metadata-integrity.md`, with exact commands
+and evidence filenames. Historical indexed timings in `e8d7096` are not safety
+validation for that implementation.
 
-| Condition | Case | Clean exits | Committed handoffs | Median | Maximum |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Warm index | Unreceipted requests | 40/40 | 40/40 | 677.40 ms | 1086.09 ms |
-| Warm index | Append before accept | 40/40 | 40/40 | 841.90 ms | 1774.69 ms |
-| Cold index/pages | Unreceipted requests | 40/40 | 40/40 | 1711.66 ms | 2570.74 ms |
-| Cold index/pages | Append before accept | 40/40 | 40/40 | 2229.52 ms | 2496.44 ms |
+## Adapter, migration and rollback
 
-Raw final evidence: `deadline-release-warm-eight.json` and
-`deadline-release-cold-eight.json`. The measured maximum was 2,570.74 ms.
+The read-only audit found the live installation still using the original hook/tmux
+package, with 0.5/0.3-second message-helper allowances. Its helper hash matches the
+original dirty checkout. There were no native transport markers or production
+cache files. No production messages, registrations, services or sessions changed.
 
-A separate single-member comparison used the **same 3-second bound** for both
-sources, so the read-path benefit is distinct from increasing the allowance:
+The temporary rehearsal loads the actual previous helper and verifies IDs,
+cursors, accepted receipts, outstanding requests and prompt-journal bytes through
+forward use, rollback and restoration. During a simulated pause, leave tombstones
+are removed only from a backed-up copy for old-helper compatibility. Both helpers
+ignore a deliberately damaged old index. Native-marked sessions remain paused and
+retain queued requests; no native provider is implemented or certified. Duplicate
+owned hook registrations are replaced by one configured command per event.
 
-| Source | Case | Median | Maximum |
-| --- | --- | ---: | ---: |
-| Previous source | Unreceipted | 387.32 ms | 389.76 ms |
-| Previous source | Append before accept | 472.38 ms | 509.43 ms |
-| Indexed source | Unreceipted | 272.16 ms | 288.46 ms |
-| Indexed source | Append before accept | 339.67 ms | 341.88 ms |
+For an authorized rollout, back up the habitat, install the hook, shared helpers,
+CLI, dashboard and instructions as one version, and verify effective registrations
+to exclude competing injectors. Keep `HIVE_DELIVERY_CACHE=off`. No cache migration
+is needed. Old cache files may be left untouched; source no longer ships or imports
+the cache module. Do not mix old/new helpers. Follow the village tombstone cleanup
+when rolling back to the original helper. Rolling back to `e8d7096` restores the
+known metadata bug and is not a safe fallback.
 
-
-Comparison commands and raw JSON live beside this repository:
-
-```sh
-python3 test/deadline_stress.py --source ../deadline-baseline-7bc --deadline 0.5 --workers 4 --cache warm --samples 5
-python3 test/deadline_stress.py --deadline 3 --workers 8 --cache warm --samples 5
-python3 test/deadline_stress.py --deadline 3 --workers 8 --cache cold --samples 5
-```
-
-The baseline directory contains only `bin` and `share` from `7bc1845`, extracted
-locally for comparison. The original checkout was not used as a writable test
-habitat. A single-member comparison at the same 3-second bound separately
-measured the benefit of the read path; small sample timings are evidence for this
-fixture, not a universal capacity guarantee.
-
-## Recovery, adapter and rollback
-
-The configured live installation still uses the original hook/tmux package,
-with its old 0.5/0.3-second helper allowances. Its helper hash matches the untouched
-original dirty checkout. The read-only audit found no native markers and no
-production cache files. No live messages, hook settings, service files or agent
-sessions were changed.
-
-The temporary migration rehearsal loads the actual previous helper. It verifies
-IDs, cursors, accepted receipts, outstanding requests and the prompt journal
-through forward use, tombstone cleanup during a simulated pause, rollback and
-forward restoration. The previous helper ignores the derived index, even when
-that index is damaged; the new helper can rebuild it. Both versions remain
-paused when transport is explicitly native, retaining the pending request.
-No native provider was added or certified.
-
-During an authorized rollout, install the hook, message helper and new cache
-module together. Portable and Nix package file lists include the module. Before
-rollback, pause delivery and apply the previously documented leave-tombstone
-cleanup. The derived index and its WAL/SHM/ownership/lock/invalidation files can
-be removed during that pause; deleting them loses no canonical work. Do not
-interpret the older helper's old deadline behavior as repaired by rollback.
-
-Forced interruption remains distinct from ordinary deadline reliability. A test
-exits immediately after stdout: the offer survives, and retry emits the **same
-IDs** with a possible-replay warning before committing them. This is durable
-at-least-once handoff, not exactly-once task execution. Agents must still avoid
-repeating completed actions when IDs replay.
-
-## Validation and readiness
-
-- **206 Python regressions passed**, including all four actual-socket HTTP/PTY
-  tests and 14 cache/timeout/interruption regressions.
-- **57 portable installer checks**, **65 smoke checks**, and the session script
-  passed; portable/Nix asset lists include `hive_logcache.py`. The Nix derivation
-  itself was not rebuilt on the nearly full root disk.
-- All three dashboard JavaScript checks, shell syntax and diff checks passed.
-- Actual-baseline migration/rollback, native-pausing, damaged-cache restoration
-  and canonical journal/receipt preservation passed in temporary habitats.
-- The controlled forced-after-stdout interruption test preserved the offer and
-  replayed the same IDs explicitly; it did not silently advance or lose work.
-
-
-The operational deadline failure is corrected within the measured envelope.
-Ready for another source review and an authorized isolated pilot using one
-coherent helper version. A broad production rollout remains unperformed and
-unapproved. Review historical unresolved obligations before activating in the
-existing habitat, inspect effective hook registrations to exclude competing
-injectors, and observe latency/replays before expanding. Larger histories,
-more than eight simultaneous delivery helpers, physical cold boot, live-native
-transport and browser usability remain outside this validation.
+Forced interruption still permits at-least-once handoff: exiting after stdout
+leaves the offer, and retry uses the same IDs with a possible-replay warning before
+committing them. This is not exactly-once task execution. Larger histories, more
+than eight simultaneous readers, physical cold boot, live-native transport,
+production latency and browser usability remain outside this isolated validation.
+An independent re-review and an authorized quiet pilot remain the next gates.

@@ -240,6 +240,10 @@ def main():
                     "read_only": True,
                     "uid": os.getuid(),
                     "root": args[0],
+                    "delivery_cache": {"mode": os.environ.get("HIVE_DELIVERY_CACHE", "off") or "off",
+                                       "enabled": False,
+                                       "supported": (os.environ.get("HIVE_DELIVERY_CACHE", "off") or "off") == "off"},
+                    "message_metadata_authority": "messages.jsonl",
                     "tools": {
                         name: shutil.which(name) for name in ("tmux", "claude", "codex", "nix", "bwrap")
                     },

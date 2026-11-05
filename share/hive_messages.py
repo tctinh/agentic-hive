@@ -130,28 +130,24 @@ def decode_records(data, previous=0):
     return result, offset
 
 
+def require_canonical_delivery():
+    mode = os.environ.get("HIVE_DELIVERY_CACHE", "off") or "off"
+    if mode != "off":
+        raise ValueError("HIVE_DELIVERY_CACHE must be 'off'; persistent metadata delivery is disabled")
+
+
 def records(root, recover=False, snapshot=None, cache=False, member=None, cursor=0):
+    """Canonical records only; old cache/member/cursor arguments are inert.
+
+    No persistent index, including unselected rows, can affect eligibility,
+    resolution, receipt reconciliation or contiguous cursor advancement.
+    """
     path = Path(root) / "messages.jsonl"
     if not path.exists():
         return []
-    # Delivery paths may build a disposable index. Deliberate reads never opt
-    # in, so discovery/history keep their read-only filesystem contract.
-    if cache and not recover and not (snapshot and ("prefix" in snapshot or "prefix_hash" in snapshot)):
-        import hive_logcache
-        indexed = hive_logcache.read(root, decode_records, member, cursor)
-        if indexed is not None:
-            result, token = indexed
-            if snapshot is not None:
-                snapshot.update(rows=result, **token)
-            return result
     data = path.read_bytes()
-    prefix = snapshot.get("prefix") if snapshot is not None else None
+    prefix = snapshot.get("prefix") if snapshot is not None and snapshot.get("authority") == "canonical-jsonl" else None
     verified = prefix is not None and data.startswith(prefix)
-    if not verified and snapshot and "prefix_hash" in snapshot:
-        end = snapshot["offset"]
-        verified = len(data) >= end and hashlib.sha256(data[:end]).hexdigest() == snapshot["prefix_hash"]
-        if verified:
-            prefix = data[:end]
     if verified:
         # Verify every cached prefix byte, even across inode replacement or
         # manual repair. Decode only the appended suffix, including completion
@@ -169,7 +165,7 @@ def records(root, recover=False, snapshot=None, cache=False, member=None, cursor
             os.fsync(stream.fileno())
     if snapshot is not None:
         snapshot.pop("prefix_hash", None)
-        snapshot.update(prefix=data[:offset], rows=result)
+        snapshot.update(prefix=data[:offset], rows=result, authority="canonical-jsonl")
     return result
 
 
@@ -348,7 +344,7 @@ def cache_if_caught_up(root, member, rows, value, signature):
         and set(value["assigned_requests"]).issubset(value["request_receipts"])
     ):
         path = nest(root, member)
-        stamp = subprocess.check_output(
+        stamp = "canonical-jsonl-v1\n" + subprocess.check_output(
             [
                 "stat",
                 "-c",
@@ -376,8 +372,6 @@ def following(reg, member, name):
 
 
 def eligible(root, reg, row, member):
-    if row.get("_skipped"):
-        return False
     if row["sender"] == member:
         return False
     # Named delivery is independent of passive attention, including after leave.
@@ -808,12 +802,13 @@ def advance(rows, value, accepted):
     value["seen"] = sorted(seen)
 
 
-def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None, use_cache=True):
+def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None, use_cache=False):
     """Persist an offer before output. No cursor movement until accepted.
 
     stdout is the old adapter's handoff boundary, not an execution ACK. A crash
     before acceptance replays the identical IDs and labels possible replay.
     """
+    require_canonical_delivery()
     if adapter(root, member) != "hooks":
         return None
     path = nest(root, member)
@@ -821,10 +816,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         signature = context_signature(root)
         reg = registry(root)
         value = state(root, member)
-        catchup = any(sub.get("catchup") and sub.get("following", True)
-                      for sub in subscriptions(root, reg, member).values())
-        rows = records(root, snapshot=snapshot, cache=use_cache,
-                       member=None if catchup else member, cursor=value["cursor"])
+        rows = records(root, snapshot=snapshot)
         status = request_status(rows)
         reconcile(rows, member, value, status)
         _, closed = status
@@ -943,6 +935,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
 
 
 def accept(root, member, offer, snapshot=None):
+    require_canonical_delivery()
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
         value = state(root, member)
@@ -952,9 +945,8 @@ def accept(root, member, offer, snapshot=None):
         # A CLI hook prepares and accepts in the same process. Reuse only its
         # unchanged ephemeral snapshot; concurrent appends/registry edits force
         # a fresh read before merging any newer state/receipts.
-        unchanged = snapshot is not None and snapshot.get("signature") == signature
-        rows = snapshot["rows"] if unchanged else records(root, snapshot=snapshot, cache=True,
-                                                         member=member, cursor=value["cursor"])
+        unchanged = snapshot is not None and snapshot.get("authority") == "canonical-jsonl" and snapshot.get("signature") == signature
+        rows = snapshot["rows"] if unchanged else records(root, snapshot=snapshot)
         advance(rows, value, [*offer["ids"], *offer["ignored"]])
         reconcile(rows, member, value, snapshot["status"] if unchanged else None)
         value["offered"] = None
@@ -972,10 +964,16 @@ def accept(root, member, offer, snapshot=None):
 
 
 def receipt(root, member, ids):
+    require_canonical_delivery()
+    # A human prompt without message IDs supplies no handoff evidence. The
+    # following hook phase reconciles current obligations; avoid a second full
+    # history read merely to accept an empty receipt set.
+    if not ids:
+        return
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
         value = state(root, member)
-        rows = records(root, cache=True, member=member, cursor=value["cursor"])
+        rows = records(root)
         reg = registry(root)
         accepted = [r["id"] for r in rows if r["id"] in ids and eligible(root, reg, r, member)]
         if value.get("offered") and set(value["offered"]["ids"]) & set(accepted):
@@ -1077,6 +1075,7 @@ def dispatch(root, row, *, retry=False):
     Existing tmux adapter is guarded by explicit working telemetry and its
     composer check. Hook acceptance and prompt receipts share the same IDs.
     """
+    require_canonical_delivery()
     report = {
         "sent": [],
         "queued": [],
@@ -1198,6 +1197,7 @@ def drain(root, member):
     Existing pre-journal attempted batches remain untouched. The sender checks
     the exact owned draft/session before retrying newer ambiguous attempts.
     """
+    require_canonical_delivery()
     path = nest(root, member)
     pending = load(path / "pending-wake.json", {"ids": []})
     rows = records(root)
@@ -1325,18 +1325,10 @@ def main():
             if report["unconfirmed"]:
                 return 2
     elif args.command == "hook":
-        from hive_logcache import CacheMismatch, invalidate
         event = args.values[0]
         header = sys.stdin.read()
         snapshot = {}
-        try:
-            offer = prepare(root, member, header, snapshot=snapshot)
-        except CacheMismatch:
-            # A derived offset/payload must never make delivery permanently
-            # depend on a bad cache. Nothing has reached stdout at this point.
-            invalidate(root)
-            snapshot = {}
-            offer = prepare(root, member, header, snapshot=snapshot, use_cache=False)
+        offer = prepare(root, member, header, snapshot=snapshot)
         if offer:
             print(
                 json.dumps(

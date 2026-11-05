@@ -1,7 +1,7 @@
-"""Direct helper deadline/receipt probe with shared history and concurrent members.
+"""Helper/wrapper deadline and receipt probe with concurrent members.
 
 Invented content matches village_costs.py. No wrapper exit is treated as proof.
-Cold means disposable index removed and advisory page eviction on this own log.
+Cold means advisory page eviction on this own log, not a physical cold boot.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +25,10 @@ def main():
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--deadline", type=float, default=3)
     parser.add_argument("--cache", choices=("warm", "cold"), default="warm")
+    parser.add_argument("--wrapper", action="store_true", help="Run the real Bash hook and its internal 3-second bounds")
+    parser.add_argument("--event", choices=("PostToolUse", "UserPromptSubmit"), default="PostToolUse")
+    parser.add_argument("--prompt-kind", choices=("plain", "transport"), default="plain",
+                        help="Transport prompts include a real message ID and exercise both scans")
     args = parser.parse_args()
     source = args.source.resolve()
     sys.path.insert(0, str(source / "share"))
@@ -55,7 +59,10 @@ def main():
                         and member not in closed[r["id"]]] for member in members}
     result = {"source": str(source), "records": len(rows), "bytes": len(log_text.encode()),
               "workers": args.workers, "samples": args.samples, "deadline_seconds": args.deadline,
-              "cache": args.cache, "cases": {}}
+              "cache": args.cache, "wrapper":args.wrapper,"event":args.event,
+              "prompt_kind":args.prompt_kind,
+              "delivery_cache_mode":"off" if hasattr(messages,"require_canonical_delivery") else "legacy-default",
+              "cases": {}}
     with tempfile.TemporaryDirectory(prefix="hive-deadline-stress-") as temporary:
         root = Path(temporary)
         for member in {"alice", "beekeeper", "bob", *[f"peer-{n}" for n in range(20)]}:
@@ -63,7 +70,7 @@ def main():
         messages.initialize(root)
         path = root / "messages.jsonl"
         (root / ".room-generation").write_text(str(len(rows)))
-        env = dict(os.environ, HIVE_ROOT=str(root), HIVE_ROOM_PROJECTION="0", PYTHONDONTWRITEBYTECODE="1",
+        env = dict(os.environ, HIVE_ROOT=str(root), HIVE_ROOM_PROJECTION="0", PYTHONDONTWRITEBYTECODE="1",HIVE_DELIVERY_CACHE="off",
                    PATH=str(source / "bin") + ":" + os.environ["PATH"])
         bootstrap = f'''import fcntl,json,os,sys
 from pathlib import Path
@@ -83,10 +90,17 @@ def appended(root,member,offer,**kwargs):
         with path.open("ab") as stream:
             stream.write((json.dumps(row)+"\\n").encode());stream.flush();os.fsync(stream.fileno())
     return original_accept(root,member,offer,**kwargs)
-messages.accept=appended
-sys.argv=["hive_messages.py","hook","PostToolUse"]
+if os.environ.get("HIVE_PROBE_APPEND")=="1":messages.accept=appended
+if os.environ.get("HIVE_PROBE_FORCE_HOOK")=="1":sys.argv=["hive_messages.py","hook","PostToolUse"]
 messages.main()
 '''
+        if args.wrapper:
+            stage=root/"probe-share"
+            stage.mkdir()
+            for file in (source/"share").glob("*.py"):
+                if file.name!="hive_messages.py":(stage/file.name).symlink_to(file)
+            (stage/"hive_messages.py").write_text(bootstrap)
+            env["HIVE_SHARE"]=str(stage)
         for case in ("unreceipted_requests", "concurrent_append_before_accept"):
             samples = []
             for sample in range(args.samples):
@@ -113,14 +127,26 @@ messages.main()
                     helper = [sys.executable, str(source / "share/hive_messages.py"), "hook", "PostToolUse"]
                     if case == "concurrent_append_before_accept":
                         helper = [sys.executable, "-c", bootstrap]
+                    if args.wrapper:
+                        helper=[str(source/"bin/hive-hook"),"claude",args.event]
+                    else:
+                        helper=["timeout",str(args.deadline)+"s",*helper]
                     started = time.perf_counter()
-                    process = subprocess.Popen(["timeout", str(args.deadline) + "s", *helper],
-                        env=dict(env, HIVE_MEMBER=member), stdin=subprocess.DEVNULL,
+                    process = subprocess.Popen(helper,
+                        env=dict(env, HIVE_MEMBER=member,HIVE_PROBE_APPEND="1" if case=="concurrent_append_before_accept" else "0",
+                                 HIVE_PROBE_FORCE_HOOK="0" if args.wrapper else "1"), stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     processes.append((member, process, started))
                 def collect(item):
                     member, process, started = item
-                    output, error = process.communicate(timeout=args.deadline + 10)
+                    prompt="Synthetic user prompt"
+                    if args.prompt_kind=="transport":
+                        # Receipt an older request so the final unread record
+                        # still exercises hook output in the append case.
+                        prompt="[hive-message id="+received[member][0]+"]\nSynthetic transport receipt"
+                    payload=json.dumps({"cwd":str(root),"tool_name":"Bash","session_id":"fixture-"+member,
+                                        "prompt":prompt}) if args.wrapper else ""
+                    output, error = process.communicate(input=payload,timeout=args.deadline*2 + 10)
                     elapsed = (time.perf_counter()-started)*1000
                     state = messages.state(root, member)
                     emitted = []
@@ -138,18 +164,50 @@ messages.main()
                             except ValueError:
                                 pass
                     committed = bool(emitted) and all(identity in handed or seq.get(identity,10**9)<=state["cursor"] for identity in emitted)
-                    return {"sample":sample, "member":member, "exit_code":process.returncode,
+                    errors={}
+                    for phase in ("hook","receipt"):
+                        marker=root/"members"/member/"state"/(phase+"-delivery-error.json")
+                        if marker.exists():errors[phase]=json.loads(marker.read_text())
+                    return {"sample":sample, "member":member, "exit_code":process.returncode,"helper_errors":errors,
                             "elapsed_ms":round(elapsed,2), "emitted_ids":emitted, "receipt_committed":committed,
                             "retained_offer":bool(state.get("offered")),
                             "concurrent_request_tracked": "probe-"+member in state.get("assigned_requests",[])
                             if case == "concurrent_append_before_accept" else None,
                             "error":error[-240:]}
                 with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                    samples.extend(pool.map(collect, processes))
+                    current=list(pool.map(collect, processes))
+                if args.wrapper:
+                    def check_replay(item):
+                        member=item["member"]
+                        payload=json.dumps({"cwd":str(root),"session_id":"fixture-"+member,"prompt":"Follow-up checkpoint"})
+                        follow=subprocess.run([str(source/"bin/hive-hook"),"claude",args.event],env=dict(env,HIVE_MEMBER=member,HIVE_PROBE_APPEND="0"),
+                            input=payload,text=True,capture_output=True,timeout=args.deadline*2+10)
+                        identities=[]
+                        if follow.stdout:
+                            context=json.loads(follow.stdout)["hookSpecificOutput"]["additionalContext"]
+                            identities=re.findall(r"^\[hive-message id=([^\]]+)\]",context,re.M)
+                        item["replayed_ids"]=sorted(set(identities)&set(item["emitted_ids"]))
+                        item["followup_exit_code"]=follow.returncode
+                        item["followup_helper_errors"]={}
+                        for phase in ("hook","receipt"):
+                            marker=root/"members"/member/"state"/(phase+"-delivery-error.json")
+                            if marker.exists():item["followup_helper_errors"][phase]=json.loads(marker.read_text())
+                        return item
+                    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                        current=list(pool.map(check_replay,current))
+                samples.extend(current)
             result["cases"][case] = {"runs":len(samples), "clean_exits":sum(r["exit_code"]==0 for r in samples),
                 "committed":sum(r["receipt_committed"] and not r["retained_offer"] for r in samples),
+                "helper_failures":sum(bool(r["helper_errors"]) for r in samples),
+                "replayed_runs":sum(bool(r.get("replayed_ids")) for r in samples),
+                "failed_followups":sum(r.get("followup_exit_code",0)!=0 or bool(r.get("followup_helper_errors")) for r in samples),
+                "untracked_requests":sum(r["concurrent_request_tracked"] is False for r in samples),
                 "max_ms":max(r["elapsed_ms"] for r in samples),"details":samples}
         print(json.dumps(result,indent=2))
+        if any(case["committed"]!=case["runs"] or case["clean_exits"]!=case["runs"] or
+               any(case[key] for key in ("helper_failures","replayed_runs","failed_followups","untracked_requests"))
+               for case in result["cases"].values()):
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

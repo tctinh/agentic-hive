@@ -13,6 +13,7 @@ umask 0002
 harness="${1:-}"
 event="${2:-}"
 HIVE_ROOT="${HIVE_ROOT:-/srv/hive}"
+export HIVE_DELIVERY_CACHE="${HIVE_DELIVERY_CACHE:-off}"
 m="${HIVE_MEMBER:-}"
 MAX_ENTRIES=12
 SHARE="${HIVE_SHARE:-$(dirname "$(readlink -f "$0")")/../share/agentic-hive}"
@@ -117,8 +118,8 @@ emit() { # additionalContext for this event
 message_helper() {
   local action="$1" code=0 temporary marker="$nest/state/$1-delivery-error.json"
   shift
-  # Warm delivery uses the header index. The bounded allowance also covers a
-  # cold rebuild or several simultaneous readers; it is not a success signal.
+  # Delivery always uses canonical JSONL metadata. The bounded allowance covers
+  # cold history reads and contention; it is not a success signal.
   timeout 3s python3 "$SHARE/hive_messages.py" "$action" "$@" 2>/dev/null || code=$?
   if ((code)); then
     temporary=$(mktemp "$nest/state/.delivery-error.XXXXXX") || return 0
@@ -136,6 +137,7 @@ deliver() {
   local header="$1" signature
   if [[ -z $header && -f $nest/state/context-stamp ]]; then
     signature=$(stat -c '%i:%s:%y' "$HIVE_ROOT/messages.jsonl" "$HIVE_ROOT/channels.json" "$nest/state/delivery.json" 2>/dev/null) || signature=""
+    [[ -z $signature ]] || signature=$'canonical-jsonl-v1\n'"$signature"
     [[ -z $signature || $signature != "$(cat "$nest/state/context-stamp" 2>/dev/null)" ]] || return 0
   fi
   exec 8>>"$nest/state/.deliver.lock" || return 0

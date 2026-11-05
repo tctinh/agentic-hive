@@ -145,6 +145,6 @@ Exact token accounting and live latency remain unmeasured here. Whole-log reads
 and rebuilding the compatibility view are acceptable starting tradeoffs for a
 small Hive; measure growing histories before adding a filesystem offset/cache.
 There is no canonical database, broker, automatic task allocation or mandatory
-status reporting. Delivery now uses an optional rebuildable SQLite header index;
-the JSONL log and member receipts remain canonical. See
-[delivery deadlines and recovery](delivery-deadlines.md).
+status reporting. Delivery reads canonical JSONL with persistent metadata caching
+disabled (`HIVE_DELIVERY_CACHE=off`); the former SQLite header index was removed
+after an integrity defect. See [delivery deadlines and recovery](delivery-deadlines.md).

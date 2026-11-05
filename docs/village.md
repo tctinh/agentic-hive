@@ -175,12 +175,12 @@ No destructive migration or new service is needed. `channels.json` receives
 optional subscription `id` values and explicit leave tombstones
 `{following:false, source:"explicit"}`. Profiles, message schemas, cursors,
 prompt receipts, claims and delegation IDs remain compatible.
-Large-log delivery may create a disposable `.messages-cache.sqlite3` header
-index and its ownership/lock/WAL files. It contains no canonical work state;
-older helpers ignore it, and removal during a delivery pause loses no messages
-or receipts. Install the new `hive_logcache.py` helper together with the CLI and
-hook adapter. [The delivery revision](delivery-deadlines.md) explains ownership,
-cache fallback and the new bounded helper allowance.
+Delivery reads canonical JSONL with `HIVE_DELIVERY_CACHE=off` (the default and
+only supported mode). The former persistent metadata index is disabled and
+removed from package asset lists. Existing cache files are ignored without
+cleanup. [The delivery revision](delivery-deadlines.md) explains the integrity
+correction, stamp invalidation and bounded helper allowance. No cache migration
+is required.
 
 Before an authorized rollout, preserve the habitat and install shared helpers,
 CLI, dashboard and member instructions as one version. Use synthetic residents
@@ -197,10 +197,10 @@ boundary, not by partially overwriting active configured files.
 
 ## Limits
 
-Explicit history reads, index rebuilds and ROOM projection remain linear in
-history. Delivery uses a rebuildable header/offset index and reads only selected
-bodies; ordinary discovery stays read-only. Prepare/accept may reuse an ephemeral
-snapshot with unchanged signatures. A changed prefix forces a fresh canonical
+History reads, delivery and ROOM projection remain linear in history. All
+delivery metadata, including unselected records, comes from canonical JSONL;
+ordinary discovery stays read-only. Prepare/accept may reuse a process-local
+canonical snapshot with unchanged signatures. A changed prefix forces a fresh canonical
 parse; verified appends can refresh just the suffix. Confirmed tmux senders reload
 under the state lock before merging newer receipts. Nothing adds a canonical
 message database, automatic task allocation or cross-host transport.

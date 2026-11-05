@@ -93,8 +93,8 @@ def main():
         merged = hive_config.merge(duplicates, desired)
         commands = [h["command"] for entry in merged["hooks"]["PostToolUse"] for h in entry["hooks"]]
         assert commands == ["/new/bin/hive-hook codex PostToolUse"]
-        # Exercise the new derived index during forward/rollback as well. The
-        # archived padding is never work, and the previous helper ignores cache files.
+        # Persistent metadata is disabled. Both versions must ignore an old,
+        # damaged cache while canonical state survives forward/rollback.
         last = current.records(root)[-1]["sequence"]
         with (root / "messages.jsonl").open("a") as stream:
             for n in range(1, 501):
@@ -103,12 +103,13 @@ def main():
                        "created_at":"2026-11-05T00:00:00+00:00","body":"archived padding "*40}
                 stream.write(json.dumps(row)+"\n")
         assert current.prepare(root, "bob") is None
-        assert (root / ".messages-cache.sqlite3").exists()
         indexed_log = (root / "messages.jsonl").read_bytes()
         assert baseline.prepare(root, "bob") is None
         (root / ".messages-cache.sqlite3").write_bytes(b"discardable damaged cache")
+        cache_bytes = (root / ".messages-cache.sqlite3").read_bytes()
         assert baseline.prepare(root, "bob") is None
         assert current.prepare(root, "bob") is None
+        assert (root / ".messages-cache.sqlite3").read_bytes() == cache_bytes
         assert current.prepare(root, "bob") is None
         assert (root / "messages.jsonl").read_bytes() == indexed_log
         assert journal.read_bytes() == old_journal
@@ -118,7 +119,7 @@ def main():
                           "native_marker_pauses_both_versions": True, "queued_native_request_preserved": True,
                           "duplicate_owned_hook_registrations_replaced": True,
                           "previous_helper_ignores_derived_index": True,
-                          "damaged_index_forward_rebuild": True,
+                          "damaged_index_ignored_without_rebuild": True,
                           "production_touched": False}, indent=2))
 
 

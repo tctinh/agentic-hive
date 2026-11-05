@@ -182,7 +182,8 @@ cleanup. [The delivery revision](delivery-deadlines.md) explains the integrity
 correction, stamp invalidation and bounded helper allowance. No cache migration
 is required. Pending offers from older helpers are rebuilt with an explicit
 version before acceptance; ignored IDs never create request receipts. See the
-[pending-offer upgrade validation](offer-upgrade.md).
+[pending-offer upgrade validation](offer-upgrade.md) and
+[confirmed-dispatch replay correction](mixed-delivery.md).
 
 Before an authorized rollout, preserve the habitat and install shared helpers,
 CLI, dashboard and member instructions as one version. Use synthetic residents

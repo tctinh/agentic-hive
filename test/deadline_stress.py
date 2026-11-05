@@ -106,6 +106,9 @@ messages.main()
             env["HIVE_SHARE"]=str(stage)
         for case in ("unreceipted_requests", "concurrent_append_before_accept"):
             samples = []
+            initial_receipts={member:[] if case=="unreceipted_requests" else
+                              [identity for identity in received[member] if base_sequences[identity]<len(rows)]
+                              for member in members}
             for sample in range(args.samples):
                 path.write_text(log_text)
                 if args.cache == "warm" and "cache" in inspect.signature(messages.records).parameters:
@@ -122,7 +125,7 @@ messages.main()
                             os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
                 for member in members:
                     value = {"cursor": len(rows)-1, "seen": [], "pending_requests": [], "assigned_requests": [],
-                             "request_receipts": [] if case == "unreceipted_requests" else received[member], "offered": None}
+                             "request_receipts": initial_receipts[member], "offered": None}
                     if args.legacy_offers:
                         value["offered"]={"ids":[],"ignored":[received[member][0]],"catchups":[],
                                           "catchup_versions":{},"text":"Unversioned pending offer","created_at":0}
@@ -160,7 +163,7 @@ messages.main()
                         context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
                         emitted = re.findall(r"^\[hive-message id=([^\]]+)\]", context, re.M)
                     handed = set(state["request_receipts"]) | set(state["seen"])
-                    before_receipts=set() if case=="unreceipted_requests" else set(received[member])
+                    before_receipts=set(initial_receipts[member])
                     explicit_receipts={received[member][0]} if args.wrapper and args.event=="UserPromptSubmit" and args.prompt_kind=="transport" else set()
                     unseen=sorted(set(state["request_receipts"])-before_receipts-set(emitted)-explicit_receipts)
                     seq = dict(base_sequences)

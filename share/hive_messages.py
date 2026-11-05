@@ -783,7 +783,8 @@ def envelope(row, limit):
 def advance(rows, value, accepted, *, ignored=()):
     known = {r["id"]: r for r in rows}
     seen = {
-        id for id in [*value["seen"], *accepted, *ignored] if id in known and known[id]["sequence"] > value["cursor"]
+        id for id in [*value["seen"], *value.get("request_receipts", []), *accepted, *ignored]
+        if id in known and known[id]["sequence"] > value["cursor"]
     }
     value["request_receipts"] = list(
         dict.fromkeys(
@@ -801,6 +802,20 @@ def advance(rows, value, accepted, *, ignored=()):
         value["cursor"] = row["sequence"]
         seen.remove(row["id"])
     value["seen"] = sorted(seen)
+
+
+def needs_context(row, value, seen, assigned, received):
+    identity = row["id"]
+    return identity not in received and (
+        identity in assigned or (row["sequence"] > value["cursor"] and identity not in seen)
+    )
+
+
+def retire_overlapping_offer(value, accepted):
+    if value.get("offered") and set(value["offered"]["ids"]).intersection(accepted):
+        # Rebuild any unconfirmed remainder from the ledger on the next hook.
+        # Clearing a batch is not acceptance of its other IDs or catch-ups.
+        value["offered"] = None
 
 
 def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None, use_cache=False):
@@ -828,7 +843,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         received = set(value["request_receipts"])
         # Composer-confirmed handoff may precede its prompt hook. A normal
         # checkpoint can retire that wake using the already accepted IDs.
-        handed = [r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen]
+        handed = [r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen or r["id"] in received]
         clear_wake(root, member, handed)
         if value.get("offered"):
             offer = value["offered"]
@@ -839,6 +854,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
             known = {r["id"]: r for r in rows}
             valid = offer.get("version") == OFFER_VERSION and all(
                 identity in known and deliverable(root, reg, rows, known[identity], member, closed)
+                and needs_context(known[identity], value, seen, assigned, received)
                 for identity in offer["ids"]
             ) and all(
                 identity in known and not deliverable(root, reg, rows, known[identity], member, closed)
@@ -859,10 +875,7 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         ignored = []
         eligible_rows = []
         for row in rows:
-            unread_assignment = (
-                row["id"] in assigned and row["id"] not in received
-            )
-            if (row["sequence"] <= value["cursor"] or row["id"] in seen) and not unread_assignment:
+            if not needs_context(row, value, seen, assigned, received):
                 continue
             if deliverable(root, reg, rows, row, member, closed):
                 eligible_rows.append(row)
@@ -999,8 +1012,7 @@ def receipt(root, member, ids):
         rows = records(root)
         reg = registry(root)
         accepted = [r["id"] for r in rows if r["id"] in ids and eligible(root, reg, r, member)]
-        if value.get("offered") and set(value["offered"]["ids"]) & set(accepted):
-            value["offered"] = None
+        retire_overlapping_offer(value, accepted)
         advance(rows, value, accepted)
         reconcile(rows, member, value)
         save_state(root, member, value)
@@ -1118,14 +1130,15 @@ def dispatch(root, row, *, retry=False):
         path = nest(root, member)
         with locked(path / ".wake.lock"):
             value = state(root, member)
-            if row["sequence"] <= value["cursor"] or row["id"] in value["seen"]:
+            if row["sequence"] <= value["cursor"] or row["id"] in value["seen"] or row["id"] in value["request_receipts"]:
                 continue
             pending = load(path / "pending-wake.json", {"ids": [], "attempted": False})
             # A hook can accept this batch while its sender is interrupted.
             # Prune only IDs already handed off by the message state; this
             # neither acknowledges nor submits any retained terminal draft.
             seen = set(value["seen"])
-            handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen}
+            received = set(value["request_receipts"])
+            handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen or r["id"] in received}
             retired = handed | {r["id"] for r in rows
                                 if r["id"] in pending["ids"] and (
                                     not deliverable(root, reg, rows, r, member)
@@ -1190,6 +1203,7 @@ def dispatch(root, row, *, retry=False):
                     value = state(root, member)
                     advance(rows, value, ids)
                     reconcile(rows, member, value)
+                    retire_overlapping_offer(value, ids)
                     save_state(root, member, value)
                 report["sent" if row["id"] in ids else "queued"].append(member)
                 clear_wake(root, member, ids)
@@ -1232,7 +1246,8 @@ def drain(root, member):
         return {"queued": [member]}
     value = state(root, member)
     row = next((r for r in rows if r["id"] in pending["ids"]
-                and r["sequence"] > value["cursor"] and r["id"] not in value["seen"]), None)
+                and r["sequence"] > value["cursor"] and r["id"] not in value["seen"]
+                and r["id"] not in value["request_receipts"]), None)
     return dispatch(root, row, retry=True) if row else {"queued": []}
 
 

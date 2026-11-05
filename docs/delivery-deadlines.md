@@ -6,7 +6,9 @@ validation. The running service and original dirty checkout remain unchanged.
 
 The subsequent [pending-offer correction](offer-upgrade.md) covers old saved
 offers and restart boundaries, including the conditional migration failure
-missed by the first cache-disable rehearsal. Its validation is current.
+missed by the first cache-disable rehearsal. The later
+[mixed-path correction](mixed-delivery.md) prevents replay of requests already
+confirmed by guarded dispatch and contains the current validation.
 
 ## Integrity correction
 
@@ -41,6 +43,8 @@ New offers carry a version. Unversioned or unknown-version offers are rebuilt
 from canonical history before output and cannot be accepted directly. Skipped
 IDs advance bookkeeping separately and never create request receipts. Current
 offer reuse and acceptance recheck exclusions against canonical eligibility.
+Confirmed dispatch and callback receipts retire overlapping hook offers; reuse
+also checks the current delivery ledger, preserving unconfirmed remaining IDs.
 Confirmed tmux sends still reload current records under the member state lock,
 preserving concurrently accepted hook receipts.
 

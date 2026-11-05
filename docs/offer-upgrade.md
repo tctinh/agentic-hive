@@ -1,6 +1,8 @@
 # Pending-offer upgrade and restart integrity
 
-This correction follows `d6bcf9e`. Disabling the persistent metadata index fixed
+This correction follows `d6bcf9e`. A subsequent inherited mixed-path replay is
+covered by the [confirmed-dispatch correction](mixed-delivery.md); its validation
+is current. Disabling the persistent metadata index fixed
 fresh delivery but did not make previously saved offers trustworthy. This is an
 isolated source change; no production deployment occurred.
 

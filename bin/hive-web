@@ -973,6 +973,18 @@ class Handler(BaseHTTPRequestHandler):
                         if kind not in ("info", "request", "decision"):
                             raise ValueError("invalid message kind")
                         options += ["--kind", kind]
+                    resolution = req.get("resolution")
+                    if resolution is not None:
+                        request_id = req.get("reply_to")
+                        if resolution != "ack" or kind != "decision" or not isinstance(request_id, str):
+                            raise ValueError("explicit resolution requires decision, ack and a recorded request ID")
+                        request = next((r for r in hive_messages.records(HIVE_ROOT)
+                                        if r["id"] == request_id and r["kind"] == "request"), None)
+                        if request is None:
+                            raise ValueError("recorded request not found")
+                        digest = hashlib.sha256(json.dumps([actor_member, request_id, body]).encode()).hexdigest()
+                        options += ["--resolution", "ack", "--reply-to", request_id,
+                                    "--to", request["sender"], "--id", "dashboard-resolution-" + digest]
                     report = json.loads(run_hive("hive", "say", *options, "-", input_text=body, member=actor_member, timeout=300))
                     self._send(200, json.dumps(report), "application/json")
                     return

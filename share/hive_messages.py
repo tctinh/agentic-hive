@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -90,31 +91,68 @@ def registry(root):
     )
 
 
-def records(root, recover=False):
-    path = Path(root) / "messages.jsonl"
-    if not path.exists():
-        return []
+def decode_records(data, previous=0):
+    # Decode complete JSONL records in one C parser pass. A singleton array
+    # around each physical line preserves JSONL boundaries, so malformed lines
+    # cannot combine into a valid record. The fallback retains precise errors.
+    complete, newline, _ = data.rpartition(b"\n")
+    if newline and complete:
+        try:
+            groups = json.loads(b"[[" + complete.replace(b"\n", b"],[") + b"]]")
+            if len(groups) != complete.count(b"\n") + 1 or any(
+                not isinstance(group, list) or len(group) != 1 for group in groups
+            ):
+                raise ValueError("one JSON object required per line")
+            decoded = [group[0] for group in groups]
+            last = previous
+            for record in decoded:
+                if record["sequence"] <= last:
+                    raise ValueError("message sequences must increase")
+                last = record["sequence"]
+            return decoded, len(complete) + 1
+        except (ValueError, KeyError, TypeError):
+            pass
     result, offset = [], 0
-    with path.open("rb") as stream:
-        lines = stream.readlines()
+    lines = BytesIO(data).readlines()
     for index, line in enumerate(lines):
         try:
             if not line.endswith(b"\n"):
                 raise ValueError("incomplete trailing record")
             record = json.loads(line)
-            if record["sequence"] <= (result[-1]["sequence"] if result else 0):
+            if record["sequence"] <= (result[-1]["sequence"] if result else previous):
                 raise ValueError("message sequences must increase")
             result.append(record)
             offset += len(line)
         except (ValueError, KeyError, TypeError):
             if index != len(lines) - 1 or line.endswith(b"\n"):
                 raise ValueError("invalid message log; repair required before delivery")
-            if recover:
-                with path.open("r+b") as stream:
-                    stream.truncate(offset)
-                    stream.flush()
-                    os.fsync(stream.fileno())
             break
+    return result, offset
+
+
+def records(root, recover=False, snapshot=None):
+    path = Path(root) / "messages.jsonl"
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    prefix = snapshot.get("prefix") if snapshot is not None else None
+    if prefix is not None and data.startswith(prefix):
+        # Verify every cached prefix byte, even across inode replacement or
+        # manual repair. Decode only the appended suffix, including completion
+        # of a formerly partial record. No persistent index is introduced.
+        old = snapshot["rows"]
+        appended, offset = decode_records(data[len(prefix):], old[-1]["sequence"] if old else 0)
+        result = [*old, *appended]
+        offset += len(prefix)
+    else:
+        result, offset = decode_records(data)
+    if recover and offset < len(data):
+        with path.open("r+b") as stream:
+            stream.truncate(offset)
+            stream.flush()
+            os.fsync(stream.fileno())
+    if snapshot is not None:
+        snapshot.update(prefix=data[:offset], rows=result)
     return result
 
 
@@ -262,8 +300,8 @@ def request_status(rows):
     return requests, closed
 
 
-def reconcile(rows, member, value):
-    requests, closed = request_status(rows)
+def reconcile(rows, member, value, status=None):
+    requests, closed = status if status is not None else request_status(rows)
     value["pending_requests"] = [
         id
         for id, r in requests.items()
@@ -272,8 +310,9 @@ def reconcile(rows, member, value):
     value["assigned_requests"] = [
         id for id, r in requests.items() if member in r.get("recipients", []) and member not in closed[id]
     ]
+    assigned = set(value["assigned_requests"])
     value["request_receipts"] = [
-        id for id in value.get("request_receipts", []) if id in value["assigned_requests"]
+        id for id in value.get("request_receipts", []) if id in assigned
     ]
 
 
@@ -333,7 +372,7 @@ def eligible(root, reg, row, member):
     if not following(reg, member, row["channel"]):
         return False
     sub = subscriptions(root, reg, member).get(row["channel"])
-    return row["channel"] == "hive" or sub is not None and row["sequence"] > sub["baseline"]
+    return row["channel"] == "hive" if sub is None else row["sequence"] > sub["baseline"]
 
 
 def deliverable(root, reg, rows, row, member, closed=None):
@@ -537,6 +576,10 @@ def channel_edit(root, actor, action, name, *, member=None, purpose="", lead=Non
                     "catchup": True,
                     "id": str(uuid.uuid4()),
                 }
+            else:
+                # Choosing an already seeded feed makes it a personal choice.
+                # Keep the original baseline and catch-up identity intact.
+                subs[name]["source"] = "explicit"
         elif action == "archive":
             rows = records(root)
             open_requests = [
@@ -746,7 +789,7 @@ def advance(rows, value, accepted):
     value["seen"] = sorted(seen)
 
 
-def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS):
+def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CHARS, snapshot=None):
     """Persist an offer before output. No cursor movement until accepted.
 
     stdout is the old adapter's handoff boundary, not an execution ACK. A crash
@@ -757,14 +800,20 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
         signature = context_signature(root)
-        rows = records(root)
+        rows = records(root, snapshot=snapshot)
         reg = registry(root)
         value = state(root, member)
-        reconcile(rows, member, value)
-        _, closed = request_status(rows)
+        status = request_status(rows)
+        reconcile(rows, member, value, status)
+        _, closed = status
+        if snapshot is not None:
+            snapshot.update(signature=signature, rows=rows, status=status)
+        seen = set(value["seen"])
+        assigned = set(value["assigned_requests"])
+        received = set(value["request_receipts"])
         # Composer-confirmed handoff may precede its prompt hook. A normal
         # checkpoint can retire that wake using the already accepted IDs.
-        handed = [r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in value["seen"]]
+        handed = [r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen]
         clear_wake(root, member, handed)
         if value.get("offered"):
             offer = value["offered"]
@@ -785,9 +834,9 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         eligible_rows = []
         for row in rows:
             unread_assignment = (
-                row["id"] in value["assigned_requests"] and row["id"] not in value["request_receipts"]
+                row["id"] in assigned and row["id"] not in received
             )
-            if (row["sequence"] <= value["cursor"] or row["id"] in value["seen"]) and not unread_assignment:
+            if (row["sequence"] <= value["cursor"] or row["id"] in seen) and not unread_assignment:
                 continue
             if deliverable(root, reg, rows, row, member, closed):
                 eligible_rows.append(row)
@@ -871,16 +920,20 @@ def prepare(root, member, header="", max_messages=MAX_MESSAGES, max_chars=MAX_CH
         return offer
 
 
-def accept(root, member, offer):
+def accept(root, member, offer, snapshot=None):
     path = nest(root, member)
     with locked(path / ".message-state.lock", wait=0.05):
         value = state(root, member)
         if value.get("offered") != offer:
             raise ValueError("offered batch changed; retain for retry")
         signature = context_signature(root)
-        rows = records(root)
+        # A CLI hook prepares and accepts in the same process. Reuse only its
+        # unchanged ephemeral snapshot; concurrent appends/registry edits force
+        # a fresh read before merging any newer state/receipts.
+        unchanged = snapshot is not None and snapshot.get("signature") == signature
+        rows = snapshot["rows"] if unchanged else records(root, snapshot=snapshot)
         advance(rows, value, [*offer["ids"], *offer["ignored"]])
-        reconcile(rows, member, value)
+        reconcile(rows, member, value, snapshot["status"] if unchanged else None)
         value["offered"] = None
         save_state(root, member, value)
     clear_wake(root, member, [*offer["ids"], *offer["ignored"]])
@@ -933,7 +986,7 @@ def actionable(rows, row, member):
         return not resolved(rows, row, member)
     if row["priority"] == "urgent":
         return True
-    if row["kind"] == "result":
+    if row["kind"] == "result" or row.get("resolution") == "ack":
         request = next(
             (r for r in rows if r["id"] == row.get("reply_to") and r["sender"] == member),
             None,
@@ -1026,7 +1079,8 @@ def dispatch(root, row, *, retry=False):
             # A hook can accept this batch while its sender is interrupted.
             # Prune only IDs already handed off by the message state; this
             # neither acknowledges nor submits any retained terminal draft.
-            handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in value["seen"]}
+            seen = set(value["seen"])
+            handed = {r["id"] for r in rows if r["sequence"] <= value["cursor"] or r["id"] in seen}
             retired = handed | {r["id"] for r in rows
                                 if r["id"] in pending["ids"] and (
                                     not deliverable(root, reg, rows, r, member)
@@ -1084,6 +1138,10 @@ def dispatch(root, row, *, retry=False):
                 # The sender now requires UserPromptSubmit, rather than a TUI
                 # reset. Receipt confirms input, never task completion.
                 with locked(path / ".message-state.lock"):
+                    # Hooks may have accepted later messages while the sender
+                    # waited for confirmation. Merge against current history,
+                    # never erase those receipts with the pre-send snapshot.
+                    rows = records(root)
                     value = state(root, member)
                     advance(rows, value, ids)
                     reconcile(rows, member, value)
@@ -1246,7 +1304,8 @@ def main():
     elif args.command == "hook":
         event = args.values[0]
         header = sys.stdin.read()
-        offer = prepare(root, member, header)
+        snapshot = {}
+        offer = prepare(root, member, header, snapshot=snapshot)
         if offer:
             print(
                 json.dumps(
@@ -1259,7 +1318,7 @@ def main():
                 ),
                 flush=True,
             )
-            accept(root, member, offer)
+            accept(root, member, offer, snapshot=snapshot)
     elif args.command == "receipt":
         payload = json.load(sys.stdin)
         prompt = payload.get("prompt", "")

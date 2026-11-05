@@ -352,6 +352,7 @@
       <button class="jump-latest" id="jump-latest" onclick="jumpToLatest()" hidden>↓ Latest messages</button></div>
     <div class="room-compose">
       <div class="reply-draft" id="reply-draft" hidden><span class="context" id="reply-context"></span><button type="button" onclick="cancelReply()" title="Cancel reply" aria-label="Cancel reply">×</button></div>
+      <label id="reply-resolution" hidden><input id="resolve-request" type="checkbox"> Resolve this request with this reply and notify its requester</label>
       <div class="mention-input">
         <div class="mention-options" id="mention-options" role="listbox" aria-label="Mention suggestions" hidden></div>
         <textarea id="room-message" maxlength="12000" aria-label="Room message" aria-controls="mention-options" aria-autocomplete="list" aria-expanded="false" placeholder="Message the Room… Type @ to choose a member."></textarea>
@@ -831,7 +832,7 @@ function renderAttention(d) {
       <p>${esc(post.body.replace(/^> Reply to [^\n]*\n\n/, ""))}</p>
       ${post.replied ? `<span class="replied">You replied</span>` : ""}
       <div class="action-row"><button type="button" data-reply-gen="${post.gen}">${post.question ? "Answer" : "Reply"}</button>
-        <button type="button" data-room-done="${post.gen}" aria-label="Mark Room #${post.gen} done">Done</button></div>
+        <button type="button" data-room-done="${post.gen}" aria-label="Dismiss notification for Room #${post.gen}">Dismiss notice</button></div>
     </article>`).join("") : `<p class="empty">No mentions to handle. New messages mentioning you will appear here.</p>`;
     if (!posts.length) $("attention-status").textContent = "";
     attentionKey = key;
@@ -862,7 +863,7 @@ async function markRoomDone(button) {
     if (!next.ok) throw new Error(`HTTP ${next.status}`);
     render(await next.json());
     feedback.classList.remove("error");
-    feedback.textContent = "Marked done.";
+    feedback.textContent = "Notice dismissed; request responsibility is unchanged.";
   } catch (err) {
     feedback.classList.add("error");
     feedback.textContent = `Could not mark done: ${err.message}`;
@@ -1177,6 +1178,18 @@ function startReply(gen) {
     excerpt = (boundary > 320 ? prefix.slice(0, boundary) : prefix) + "…";
   }
   replyTo = {gen: post.gen, member: post.member, excerpt, channel: post.channel === "dm" ? "hive" : post.channel};
+  $("reply-resolution").hidden = true;
+  $("resolve-request").checked = false;
+  if (post.id) {
+    const target = replyTo;
+    fetch(`/api/messages?id=${encodeURIComponent(post.id)}`, {cache: "no-store"})
+      .then(response => response.ok ? response.json() : null)
+      .then(row => {
+        if (replyTo !== target || row?.kind !== "request") return;
+        target.requestId = row.id;
+        $("reply-resolution").hidden = false;
+      }).catch(() => {}); // Failed lookup leaves ordinary replies available.
+  }
   $("reply-context").innerHTML = `<b>Replying to ${esc(memberName(post.member))} · ${esc(post.channel || "hive")} #${post.gen}</b><span class="reply-excerpt">${esc(post.body.replace(/^> Reply to [^\n]*\n\n/, "").replace(/\s+/g, " "))}</span>`;
   $("reply-draft").hidden = false;
   $("room-message").maxLength = 12000 - `> Reply to ${post.member} · Room #${post.gen}: ${excerpt}\n\n`.length;
@@ -1188,6 +1201,8 @@ function startReply(gen) {
 function cancelReply() {
   replyTo = null;
   $("reply-draft").hidden = true;
+  $("reply-resolution").hidden = true;
+  $("resolve-request").checked = false;
   $("room-message").maxLength = 12000;
 }
 
@@ -1207,6 +1222,11 @@ async function sendRoomMessage() {
   try {
     const payload = {message, channel: replyTo?.channel || currentChannel || "hive"};
     if ($("room-kind").value) payload.kind = $("room-kind").value;
+    if (replyTo?.requestId && $("resolve-request").checked) {
+      payload.kind = "decision";
+      payload.resolution = "ack";
+      payload.reply_to = replyTo.requestId;
+    }
     const res = await fetch("/api/room", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);

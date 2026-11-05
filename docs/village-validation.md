@@ -1,5 +1,9 @@
 # Village implementation validation
 
+This records validation of the first implementation, `1f49eb9`. Independent
+review subsequently found additional correctness issues; the fixes, additional
+tests and current pilot assessment are in [the review follow-up](village-review-followup.md).
+
 All validation used synthetic habitats, fake harness adapters or temporary local
 HTTP/PTY fixtures. No live Hive member was messaged, restarted or reconfigured.
 The running service was not changed. The Nix package itself was not rebuilt.

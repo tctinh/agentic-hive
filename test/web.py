@@ -153,6 +153,37 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         for payload in ({"channel": "../bad"}, {"kind": "result"}, {"channel": 12}):
             self.assertEqual(self.request("/api/room", {"message": "bad", **payload})[0], 400)
 
+    def test_dashboard_reply_and_dismiss_do_not_close_work_but_explicit_resolution_does(self):
+        web.hive_messages.channel_edit(self.root, "alice", "create", "choice")
+        request = web.hive_messages.post(self.root, "alice", "@beekeeper Which choice?", channel="choice",
+                                         kind="request", recipients=["beekeeper"])
+        reply = "> Reply to alice · Room #1: Which choice?\n\n@alice Use B"
+        self.assertEqual(self.request("/api/room", {"message": reply, "channel": "choice", "kind": "info"})[0], 200)
+        self.assertEqual(self.request("/api/room-done", {"generation": 1})[0], 200)
+        self.assertFalse(web.hive_messages.resolved(web.hive_messages.records(self.root), request))
+        with self.assertRaisesRegex(ValueError, "open requests"):
+            web.hive_messages.channel_edit(self.root, "alice", "archive", "choice")
+        payload = {"message": reply, "channel": "choice", "kind": "decision",
+                   "resolution": "ack", "reply_to": request["id"]}
+        status, report = self.request("/api/room", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(report["sent"], ["alice"])
+        rows = web.hive_messages.records(self.root)
+        self.assertTrue(web.hive_messages.resolved(rows, request))
+        self.assertEqual(rows[-1]["recipients"], ["alice"])
+        self.assertEqual(rows[-1]["reply_to"], request["id"])
+        self.assertEqual(rows[-1]["sender_authority"], "owner")
+        self.assertEqual(self.request("/api/room", payload)[1]["id"], report["id"])
+        self.assertEqual(len(web.hive_messages.records(self.root)), len(rows))
+        self.assertEqual((self.root / "sent-targets").read_text().splitlines(), ["alice"])
+        web.hive_messages.channel_edit(self.root, "alice", "archive", "choice")
+
+    def test_dashboard_resolution_requires_explicit_recorded_request(self):
+        for payload in ({"resolution": "ack"}, {"resolution": "cancel", "kind": "decision"},
+                        {"resolution": "ack", "kind": "decision", "reply_to": "missing"},
+                        {"resolution": "ack", "kind": "request", "reply_to": "missing"}):
+            self.assertEqual(self.request("/api/room", {"message": "close", **payload})[0], 400)
+
     def test_unknown_mention_never_posts(self):
         status, data = self.request("/api/room", {"message": "@missing do work"})
         self.assertEqual(status, 400)

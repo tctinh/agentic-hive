@@ -194,9 +194,12 @@ tab; questions have an
 Mentions remain visible beyond the Room's last forty displayed posts, within its
 bounded history window. Sending a reply automatically clears its notification.
 The reply quotes the original question and its Room number for the receiving
-member. Click **Done** to dismiss a notification without replying; dismissal
+member. Click **Dismiss notice** to dismiss a notification without replying; dismissal
 survives refreshes and other browsers.
-Done keeps the original Room message and sends no prompts. This personal
+Dismissal keeps the original Room message and sends no prompts. It does not
+resolve an underlying request. When answering a recorded request, explicitly
+select **Resolve this request with this reply** to close it and notify its
+requester. Ordinary replies keep work open. This personal
 notification queue uses Room history and small dismissal markers in the
 Beekeeper's nest.
 
@@ -367,7 +370,7 @@ identify the sender as `beekeeper-<name>`, so agents can distinguish who asked
 for what. Earlier messages keep their original author.
 
 Autocomplete includes human names. `@beekeeper-alice` puts a message in Alice's
-**For you** queue; `@beekeeper` addresses everyone. Done and replies clear only
+**For you** queue; `@beekeeper` addresses everyone. Dismissals and replies clear only
 that person's cards. Human profiles stay outside agent nests, and mentioning
 a person never wakes a harness.
 

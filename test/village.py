@@ -77,6 +77,65 @@ class Village(unittest.TestCase):
         row = messages.post(self.root, "alice", "named global", kind="request", recipients=["bob"])
         self.assertIn(row["id"], self.deliver("bob")["ids"])
 
+    def test_rejoin_hive_without_checkpoint_respects_explicit_baseline(self):
+        self.edit("bob", "leave", "hive")
+        for n in range(16):
+            messages.post(self.root, "alice", f"while away {n}")
+        self.edit("bob", "join", "hive")
+        offer = self.deliver("bob")
+        self.assertEqual(offer["ids"], [])
+        self.assertIn("Channel catch-up: hive", offer["text"])
+        self.assertLessEqual(offer["text"].count("while away"), 2)
+        self.assertIsNone(self.deliver("bob"))
+        live = messages.post(self.root, "alice", "after rejoin")
+        self.assertEqual(self.deliver("bob")["ids"], [live["id"]])
+
+    def test_explicit_join_promotes_team_feed_without_resetting_catchup(self):
+        hive_members.update(self.root, "bob", project="debter", team="titantwoshot")
+        original = dict(messages.registry(self.root)["subscriptions"]["bob"]["debter/titantwoshot"])
+        self.edit("bob", "join", "debter/titantwoshot")
+        promoted = messages.registry(self.root)["subscriptions"]["bob"]["debter/titantwoshot"]
+        self.assertEqual(promoted, {**original, "source": "explicit"})
+        hive_members.update(self.root, "bob", team="newteam")
+        self.assertEqual(messages.registry(self.root)["subscriptions"]["bob"]["debter/titantwoshot"], promoted)
+
+    def test_confirmed_sender_preserves_concurrent_later_hook_receipt(self):
+        first = self.post("first", kind="request", recipients=["bob"], message_id="first")
+        def send(*args, **kwargs):
+            second = self.post("second", kind="request", recipients=["bob"], message_id="second")
+            messages.receipt(self.root, "bob", [first["id"], second["id"]])
+            self.assertEqual(set(messages.state(self.root, "bob")["request_receipts"]), {"first", "second"})
+            return subprocess.CompletedProcess(args, 0, "confirmed", "")
+        with patch("hive_messages.subprocess.run", side_effect=send):
+            self.assertEqual(messages.dispatch(self.root, first)["sent"], ["bob"])
+        state = messages.state(self.root, "bob")
+        self.assertEqual(set(state["request_receipts"]), {"first", "second"})
+        self.assertEqual(set(state["assigned_requests"]), {"first", "second"})
+        self.assertEqual(state["cursor"], 2)
+        self.assertIsNone(self.deliver("bob"))
+
+    def test_hook_snapshot_invalidates_when_later_receipt_arrives(self):
+        first = self.post("first", kind="request", recipients=["bob"], message_id="first")
+        snapshot = {}
+        offer = messages.prepare(self.root, "bob", snapshot=snapshot)
+        second = self.post("second", kind="request", recipients=["bob"], message_id="second")
+        messages.receipt(self.root, "bob", [second["id"]])
+        messages.accept(self.root, "bob", offer, snapshot=snapshot)
+        self.assertEqual(set(messages.state(self.root, "bob")["request_receipts"]), {first["id"], second["id"]})
+        self.assertIsNone(self.deliver("bob"))
+
+    def test_requester_can_explicitly_close_after_a_conversational_answer(self):
+        request = self.post("Which direction?", kind="request", recipients=["bob"])
+        self.post("B seems best", sender="bob", kind="info", recipients=["alice"])
+        self.assertFalse(messages.resolved(messages.records(self.root), request))
+        resolution = self.post("B selected; request resolved", kind="decision", reply_to=request["id"],
+                               resolution="ack", recipients=["bob"])
+        self.assertTrue(messages.resolved(messages.records(self.root), request))
+        with patch("hive_messages.subprocess.run") as run:
+            messages.dispatch(self.root, resolution)
+            run.assert_not_called()  # The requester closing its own work is passive to the assignee.
+        self.edit("alice", "archive")
+
     def test_outsider_request_and_result_survive_leave_restart_and_replay(self):
         self.edit("bob", "join")
         request = self.post("Check chase speed", kind="request", recipients=["bob"])
@@ -218,6 +277,43 @@ class Village(unittest.TestCase):
         self.assertIn("read_full", page["messages"][0])
         self.assertLessEqual(len(json.dumps(page, ensure_ascii=False)), 8200)
 
+    def test_bulk_log_reader_keeps_partial_write_and_corruption_semantics(self):
+        body = 'Unicode 日本語; braces {[]}; newline\ncarriage\r quote "'
+        row = self.post(body)
+        path = self.root / "messages.jsonl"
+        complete = path.read_bytes()
+        with path.open("ab") as stream:
+            stream.write(json.dumps({"sequence": 2, "body": "unfinished"}).encode())
+        self.assertEqual(messages.records(self.root), [row])
+        self.assertGreater(path.stat().st_size, len(complete))
+        self.assertEqual(messages.records(self.root, recover=True), [row])
+        self.assertEqual(path.read_bytes(), complete)
+        path.write_bytes(complete + b"broken complete record\n")
+        with self.assertRaisesRegex(ValueError, "repair required"):
+            messages.records(self.root, recover=True)
+        for corrupt in (b'{"sequence":1\n"body":"x"},{"sequence":2}\n',
+                        b'{"sequence":1},{"sequence":2}\n', b'{"sequence":1}\n\n'):
+            path.write_bytes(corrupt)
+            with self.assertRaisesRegex(ValueError, "repair required"):
+                messages.records(self.root)
+
+    def test_ephemeral_log_snapshot_verifies_prefix_and_partial_append(self):
+        first = self.post("first")
+        path = self.root / "messages.jsonl"
+        snapshot = {}
+        complete = path.read_bytes()
+        second = {**first, "id": "second", "sequence": 2, "body": "second"}
+        encoded = json.dumps(second).encode() + b"\n"
+        path.write_bytes(complete + encoded[:20])
+        self.assertEqual(messages.records(self.root, snapshot=snapshot), [first])
+        path.write_bytes(complete + encoded)
+        self.assertEqual(messages.records(self.root, snapshot=snapshot), [first, second])
+        changed = {**first, "body": "repaired first"}
+        path.write_text(json.dumps(changed) + "\n" + json.dumps(second) + "\n")
+        self.assertEqual(messages.records(self.root, snapshot=snapshot), [changed, second])
+        path.write_text(json.dumps(changed) + "\n")
+        self.assertEqual(messages.records(self.root, snapshot=snapshot), [changed])
+
     def test_busy_village_does_not_turn_other_workshops_into_context(self):
         self.edit("bob", "leave", "hive")
         self.edit("bob", "join")
@@ -236,6 +332,19 @@ class Village(unittest.TestCase):
         self.assertEqual(offer["ids"], [direct["id"], passive["id"]])
         self.assertNotIn("unrelated detail", offer["text"])
         self.assertLess(len(offer["text"]), 2000)
+
+    def test_duplicate_registered_hook_processes_have_one_delivery_owner(self):
+        row = self.post("single checkpoint delivery", kind="request", recipients=["bob"])
+        source = Path(__file__).resolve().parents[1]
+        env = dict(os.environ, HIVE_ROOT=str(self.root), HIVE_MEMBER="bob",
+                   PATH=str(source / "bin") + ":" + os.environ["PATH"])
+        processes = [subprocess.Popen([str(source / "bin/hive-hook"), "claude", "PostToolUse"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, env=env) for _ in range(2)]
+        outputs = [p.communicate(input="{}", timeout=5)[0] for p in processes]
+        self.assertTrue(all(p.returncode == 0 for p in processes))
+        self.assertEqual(sum(text.count(f"[hive-message id={row['id']}]") for text in outputs), 1)
+        self.assertEqual(messages.state(self.root, "bob")["request_receipts"], [row["id"]])
 
     def test_cli_self_service_and_paginated_reads(self):
         binary = str(Path(__file__).resolve().parents[1] / "bin/hive")

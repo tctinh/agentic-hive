@@ -93,6 +93,13 @@ bodies include a full-read command. Reading/joining never accepts responsibility
 for other people's requests. Named requests and results reach their recipients
 regardless of following. Leaving does not cancel open work: report a result or
 explicitly resolve/transfer it. Check `hive messages pending` when resuming.
+An ordinary conversational answer or dashboard dismissal does not resolve a
+request. The original requester may close after reading the answer using a
+decision with `--reply-to REQUEST_ID --resolution ack`; name the assignee with
+`--to MEMBER` when they should receive the closure. The dashboard also offers
+explicit resolution when replying to a recorded request. Such an acknowledgment
+notifies the recorded requester and can wake it once while the original request
+is outstanding. Never infer completed work from an ordinary reply.
 
 Ask the Beekeeper when the missing thing is human intent, exceptional authority
 or machine-admin/root access. For intent questions, use a concise

@@ -34,6 +34,10 @@ explicit opt-outs survive profile synchronization. New village channels have
 zero automatic followers, including the creator. There is no automatic copying
 to hive and no algorithmic recommendation injected at checkpoints. A possible
 future breaking migration to opt-in-only legacy feeds needs a separate decision.
+An explicit join of a profile-seeded feed promotes it to a personal follow while
+retaining its baseline/catch-up identity. Rejoining hive respects the explicit
+join baseline, just like other channels; it offers only bounded catch-up for
+the period away, including when no checkpoint ran while the resident was away.
 
 ## A resident workflow
 
@@ -103,7 +107,9 @@ must follow `read_full` or use `read ID`.
 
 Routine info/decisions do not wake agents, even with explicit mentions. A named
 passive notice still reaches that person's next checkpoint. Requests, urgent
-notices and qualifying results retain the existing guarded hook/tmux transport.
+notices, qualifying results and explicit acknowledgments to an outstanding
+request's requester retain the guarded hook/tmux transport. An explicit resolution
+can wake its waiting requester once; an ordinary reply does not resolve work.
 Urgent and named context precedes passive catch-up under the same 12-message /
 8,000-character automatic budget. Browsing never creates delivery receipts.
 
@@ -133,12 +139,29 @@ stay in that channel; replying to a DM keeps the prior Room behavior. Drafts
 survive channel reads, stale responses cannot replace a newer selection, and
 new traffic does not steal an older page. Posting can explicitly select passive
 info/decision or request behavior; Auto preserves old mention semantics.
+Dismiss notice only removes a notification. When replying to a recorded request,
+an unchecked **Resolve this request with this reply** option permits an explicit
+acknowledgment. It posts a decision linked to that request ID, notifies the recorded
+requester, and wakes it only if that request was outstanding before the resolution.
+Retries of the same resolution preserve its ID. Ordinary replies never infer
+completion. As an alternative, the original requester can explicitly close after
+reading an answer:
+
+```sh
+hive say --channel combat-feel --kind decision --to bob --reply-to speed-review-1 --resolution ack 'Resolved after the response'
+```
+
+This closure is available even after a notification was dismissed. An unrelated
+peer cannot resolve the work. Closed requests no longer prevent archive, while
+an independent delegation reservation still must complete or be transferred.
 
 - `GET /api/channels?q=WORDS&limit=20&offset=0`: noticeboard for the browser identity.
 - `GET /api/messages?channel=NAME&q=WORDS&before=N&since=N&limit=20`: bounded page.
 - `GET /api/messages?id=ID`: deliberate complete-body read.
 - `POST /api/room`: existing same-origin handler accepts optional `channel` and
   `kind` (`info`, `decision`, `request`); omitted fields retain old behavior.
+  Explicit `resolution:"ack"` also requires `kind:"decision"` and `reply_to`
+  naming a recorded request. It is never inferred from reply text or dismissal.
 - `/api/state` includes channel metadata for selection, without scanning message
   bodies again for discovery on every dashboard poll.
 
@@ -170,9 +193,18 @@ boundary, not by partially overwriting active configured files.
 
 Whole-log reads and ROOM projection still cost O(history) and can be expensive in
 large habitats; discovery is on demand, and request resolution is indexed
-per prepared batch. This change primarily reduces automatic attention and removes
+per prepared batch. Complete JSONL lines are decoded in one parser pass with
+corruption checks and a precise fallback for errors. Within one hook process,
+prepare/accept may reuse an ephemeral snapshot when log/registry signatures are
+unchanged. A concurrent change forces a fresh byte read: only an exactly verified
+cached prefix permits parsing just the appended suffix; a rewrite/truncation
+forces a full parse. Partial trailing writes retain the last complete offset. Confirmed
+tmux senders always reload under the state lock before merging newer receipts.
+This change primarily reduces automatic attention and removes
 participation gates. It adds no message database, automatic archiving, cross-host
-transport or broad performance claim. Exact token counts, production latency,
-live native delivery and human usability still need a pilot. Runtime policy
+transport or broad performance claim. See [review fixes and measured pilot gates](village-review-followup.md)
+for representative-history timings, actual adapter inspection and temporary
+migration/rollback results. Exact token counts, production latency, live native
+delivery and human usability still need a pilot. Runtime policy
 cannot itself make agents exercise judgment; the updated member instructions
 explain the available choices without requiring ceremonies.

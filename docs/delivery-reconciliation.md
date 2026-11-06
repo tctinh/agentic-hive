@@ -1,5 +1,10 @@
 # Delivery safety and NixOS handoff — 2026-11-06
 
+This records the first handoff at `7330a09`. The later
+[closed-journal recovery follow-up](obsolete-delivery-recovery.md) supersedes its
+recovery and rebuild instructions. Package hashes and validation totals below
+are historical; Codex has not rebuilt or activated the follow-up source.
+
 The local branch `fix/delivery-reconciliation` includes Agent Village through
 `24794002d6804be63ff9b5730ae4f56c8871719b` and the delivery fixes described here.
 It is staged in an independent checkout. It has not been merged into the original

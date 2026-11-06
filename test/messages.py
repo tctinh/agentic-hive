@@ -2,6 +2,7 @@
 
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -298,7 +299,8 @@ class MessageTests(unittest.TestCase):
         terminal.footer = "  model status · 97% context left"
         terminal.fail_paste = True
         def transport(args, **kwargs):
-            code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
+            with patch.dict(os.environ, kwargs.get("env", {})):
+                code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
             return subprocess.CompletedProcess(args, code, detail if code == 0 else "", detail if code else "")
         with patch("hive_messages.subprocess.run", side_effect=transport):
             first = self.post("first", channel="dm", kind="request", recipients=["bob"])
@@ -339,10 +341,15 @@ class MessageTests(unittest.TestCase):
         terminal.footer = ("  GPT-6.1-Sol xhigh · /srv/hive/projects · Work\n"
             "  ? for shortcuts                                     ⚠ 2 warnings · f2 to view")
         def transport(args, **kwargs):
-            code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
+            with patch.dict(os.environ, kwargs.get("env", {})):
+                code, detail = hive_prompt.send(self.root, "bob", args[-1], run=terminal.run, require_idle=True)
             return subprocess.CompletedProcess(args, code, detail if code == 0 else "", detail if code else "")
         with patch("hive_messages.subprocess.run", side_effect=transport):
             report = messages.dispatch(self.root, second)
+        if not pending_old:
+            self.assertIn("bob", report["unconfirmed"])
+            self.assertEqual((terminal.pastes, terminal.enters), (0, 0))
+            return
         if occupied:
             self.assertEqual(report["queued"], ["bob"])
             self.assertEqual((terminal.pastes, terminal.enters), (0, 0))
@@ -357,7 +364,7 @@ class MessageTests(unittest.TestCase):
         self.assertIn(second["id"], messages.state(self.root,"bob")["request_receipts"])
         self.assertFalse((path / "pending-wake.json").exists())
 
-    def test_hook_handoff_releases_stale_journal_and_latched_new_batch(self):
+    def test_hook_handoff_cannot_license_an_unrelated_uncertain_batch(self):
         self.check_hook_handoff_recovery()
 
     def test_hook_handoff_prunes_an_already_received_old_batch_before_new_send(self):
@@ -378,7 +385,7 @@ class MessageTests(unittest.TestCase):
         self.assertFalse(messages.journal_handed_off(path,{"session_id":"another"}))
         self.assertTrue(messages.journal_handed_off(path,{"session_id":"fixture"}))
 
-    def test_native_history_releases_a_mismatched_old_journal_latch(self):
+    def test_native_history_cannot_license_an_unrelated_uncertain_batch(self):
         import hashlib
         import hive_prompt
         import os
@@ -408,7 +415,8 @@ class MessageTests(unittest.TestCase):
             'type':'message','role':'developer','content':[{'type':'input_text','text':text}]}}
         terminal = Terminal(self.root)
         def transport(args, **kwargs):
-            code, detail = hive_prompt.send(self.root,"bob",args[-1],run=terminal.run,require_idle=True)
+            with patch.dict(os.environ, kwargs.get("env", {})):
+                code, detail = hive_prompt.send(self.root,"bob",args[-1],run=terminal.run,require_idle=True)
             return subprocess.CompletedProcess(args,code,detail if code==0 else '',detail if code else '')
         with patch.dict(os.environ,{'CODEX_HOME':str(home)}), patch('hive_messages.subprocess.run',side_effect=transport):
             transcript.write_text(json.dumps(header)+'\n'+json.dumps(turn)+'\n')
@@ -416,10 +424,9 @@ class MessageTests(unittest.TestCase):
             self.assertEqual((terminal.pastes,terminal.enters),(0,0))
             turn['payload']['role']='user'
             transcript.write_text(json.dumps(header)+'\n'+json.dumps(turn)+'\n')
-            self.assertEqual(messages.dispatch(self.root,new)['sent'],['bob'])
-        self.assertEqual((terminal.pastes,terminal.enters),(1,1))
-        self.assertEqual(terminal.message,body)
-        self.assertFalse((path/'pending-wake.json').exists())
+            self.assertIn('bob', messages.dispatch(self.root,new)['unconfirmed'])
+        self.assertEqual((terminal.pastes,terminal.enters),(0,0))
+        self.assertTrue((path/'pending-wake.json').exists())
 
     def test_busy_to_idle_drain_and_new_working_race(self):
         atomic(self.root / "telemetry/members/bob.json", {"status":"working"})

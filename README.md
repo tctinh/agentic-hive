@@ -350,7 +350,7 @@ on smaller screens. Closing the browser terminal leaves the member running.
 For uncertain delivery, `hive-member delivery-status MEMBER` inspects the retained
 evidence without sending input. `hive-member delivery-reconcile MEMBER` can
 confirm an existing exact submission proof; ambiguous drafts remain blocked.
-See the [delivery recovery and NixOS handoff notes](docs/delivery-reconciliation.md).
+See the [delivery recovery and NixOS handoff notes](docs/obsolete-delivery-recovery.md).
 
 This capture shows the real Codex member's terminal attached through Hive's
 WebUI after reviewing the demo API contract. The input bar contains an unsent
@@ -544,6 +544,7 @@ python3 test/config.py
 python3 test/runtime.py
 python3 test/messages.py
 PYTHONPATH=test python3 -m unittest delivery_reconciliation
+PYTHONPATH=test python3 -m unittest obsolete_delivery
 python3 test/village.py
 python3 test/delegation.py
 nix-shell -p 'python3.withPackages (p: [ p.markdown-it-py ])' --run 'python3 test/devlogs.py'

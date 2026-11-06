@@ -160,6 +160,85 @@ def native_receipt(record, cache, codex_home):
     return None
 
 
+def closed_journal_proof(root, member, record):
+    """Canonical closure makes a request obsolete; it does not prove receipt.
+
+    This deliberately excludes unknown IDs, ID-less attempts and mixed batches.
+    A null historical session can never license input or become an ACK here.
+    """
+    from hive_messages import records, request_status, context_signature
+    ids = record.get("ids")
+    if (not isinstance(ids, list) or not ids or any(not isinstance(id, str) for id in ids)
+        or len(set(ids)) != len(ids)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("hash", "")))):
+        return None
+    try:
+        signature = context_signature(root)
+        rows = records(root)
+    except FileNotFoundError:
+        return None
+    requests, closed = request_status(rows)
+    if any(id not in requests or member not in requests[id].get("recipients", [])
+        or member not in closed[id] for id in ids):
+        return None
+    # Keep the exact request and authorized closure records in the audit, not
+    # an inference from the current assignment list, a cursor or a receipt.
+    evidence = []
+    for identity in ids:
+        request = requests[identity]
+        resolutions = [row for row in rows if row.get("reply_to") == identity and (
+            (row.get("resolution") in ("ack", "cancel") and (
+                row["sender"] == request["sender"] or row.get("sender_authority") == "owner"))
+            or (row["sender"] == member and (row["kind"] == "result" or row.get("resolution") in ("ack", "cancel"))))]
+        evidence.append({"request": request, "resolutions": resolutions})
+    if context_signature(root) != signature:
+        return None
+    return {"basis": "canonical-requests-closed", "history_signature": signature, "records": evidence}
+
+
+def retire_closed_delivery(root, member, record, *, run=subprocess.run):
+    """Caller holds .prompt.lock. Retire obsolete work only at a quiet target.
+
+    Inspect the current target rather than adopting a missing historical session.
+    Preserve the original record and proof; never clear input or create an ACK.
+    """
+    path = Path(root) / "members" / member / "state"
+    proof = closed_journal_proof(root, member, record)
+    if not proof:
+        return None, "no canonical closure proof for every journal ID"
+    telemetry_path = Path(root) / "telemetry/members" / f"{member}.json"
+    before = load(telemetry_path)
+    session = before.get("session_id")
+    initializing = (os.environ.get("HIVE_DELIVERY_STARTUP_EVENT")
+        and before.get("event_id") == os.environ["HIVE_DELIVERY_STARTUP_EVENT"]
+        and before.get("last_event") == "SessionStart")
+    if not isinstance(session, str) or not session.strip() or (before.get("status") != "idle" and not initializing):
+        return None, "current target must have an identified idle session"
+    try:
+        first, pane = terminal_snapshot(member, run)
+        second, other_pane = terminal_snapshot(member, run)
+    except (OSError, subprocess.CalledProcessError) as error:
+        return None, f"could not inspect current target; no retirement: {error}"
+    after = load(telemetry_path)
+    if any(after.get(key) != before.get(key) for key in ("session_id", "status", "event_id", "last_event")):
+        return None, "session or turn changed during retirement inspection"
+    if not pane or pane != other_pane or not empty(first) or not empty(second):
+        return None, "current composer is occupied, unavailable or changed; preserve its draft"
+    # Re-read canonical state after the terminal reads. No persisted cache or
+    # previously printed status report can authorize this transition.
+    if closed_journal_proof(root, member, record) != proof:
+        return None, "canonical history changed during retirement inspection"
+    if load(path / "prompt-delivery.json") != record:
+        return None, "journal changed during retirement inspection"
+    inspection = {"session_id": session, "pane_id": pane, "status": before.get("status"),
+        "event_id": before.get("event_id"), "empty_composer_observations": 2}
+    audit = audit_record(path, "retire-closed-requests", record, closure=proof, inspection=inspection)
+    retired = dict(record, stage="retired", retirement={"reason": "canonical requests closed; submission remains unproven",
+        "audit": audit, "basis": proof["basis"], "ids": record["ids"], "inspection": inspection})
+    atomic(path / "prompt-delivery.json", retired)
+    return retired, None
+
+
 def delivery_status(root, member):
     """Read-only evidence report. Absence of proof never means non-delivery."""
     path = Path(root) / "members" / member / "state"
@@ -176,20 +255,31 @@ def delivery_status(root, member):
         confirmed = proof_acknowledges(record, proof, session)
     received = load(path / "delivery.json").get("request_receipts", [])
     pending = load(path / "pending-wake.json")
+    closure = closed_journal_proof(root, member, record) if record and record.get("stage") != "acknowledged" else None
+    retired = record.get("stage") == "retired" and bool(record.get("retirement"))
     return {"member": member, "journal": record, "current_session": session,
         "pending_ids": pending.get("ids", []), "attempted": pending.get("attempted", False),
         "last_outcome": load(path / "delivery-outcome.json"),
         "submission_proven": confirmed, "native_proof": proof,
+        "closure_proof": closure, "retirement_candidate": bool(closure and not retired),
         "hook_handoff": bool(record.get("ids") and all(id in received for id in record["ids"])),
-        "status": "no-journal" if not record else "submission-proven" if confirmed else "inspection-required",
-        "reason": None if confirmed or not record else
+        "status": "no-journal" if not record else "retired" if retired else "submission-proven" if confirmed else "inspection-required",
+        "reason": "closed requests retired; submission remains unproven" if retired else None if confirmed or not record else
+            "canonical requests closed; reconcile at an identified quiet empty target; submission remains unproven" if closure else
             "missing or changed session identity" if not stable else "no exact submission proof; preserve the draft and do not resend"}
 
 
-def reconcile_delivery(root, member):
-    """Caller holds .prompt.lock. Confirm evidence only; no terminal mutation."""
+def reconcile_delivery(root, member, *, run=subprocess.run):
+    """Caller holds .prompt.lock. Confirm or retire proven obsolete work only."""
     report = delivery_status(root, member)
     if not report["submission_proven"]:
+        if report["retirement_candidate"]:
+            retired, reason = retire_closed_delivery(root, member, report["journal"], run=run)
+            if retired:
+                report.update(status="retired", journal=retired, retirement_candidate=False,
+                    audit=retired["retirement"]["audit"], reason="closed requests retired; submission remains unproven")
+            else:
+                report["reason"] = reason
         return report
     path = Path(root) / "members" / member / "state"
     record = report["journal"]
@@ -309,6 +399,19 @@ def collapsed(parts):
     return parts is not None and re.fullmatch(r"\[Pasted (?:Content|text) [^\]\n]+\]", normalized("\n".join(parts))) is not None
 
 
+def terminal_snapshot(member, run, *, owned=False, expected=None):
+    """Read one stable composer. All callers share the same dialog/mode guard."""
+    def command(*args):
+        return run(["tmux", *args], text=True, capture_output=True, check=True)
+    metadata = command("display-message", "-p", "-t", f"=hive-{member}:0.0", "#{cursor_y} #{pane_in_mode} #{pane_id}").stdout.strip().split()
+    if len(metadata) != 3 or not metadata[0].isdigit() or metadata[1] != "0" or not metadata[2]:
+        return None, None
+    screen = command("capture-pane", "-p", "-t", f"=hive-{member}:0.0").stdout.splitlines()
+    if command("display-message", "-p", "-t", f"=hive-{member}:0.0", "#{cursor_y} #{pane_in_mode} #{pane_id}").stdout.strip().split() != metadata:
+        return None, None
+    return composer(screen, int(metadata[0]), owned=owned, expected=expected), metadata[2]
+
+
 def send(root, member, message, *, run=subprocess.run, require_idle=False):
     path = Path(root) / "members" / member / "state"
     journal = path / "prompt-delivery.json"
@@ -322,6 +425,11 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
 
     if not isinstance(identity, str) or not identity.strip():
         return 3, "session identity is not ready; no input was pasted"
+    if (os.environ.get("HIVE_DELIVERY_RETRY_UNCERTAIN") == "1"
+        and (previous.get("hash") != key or previous.get("ids") != ids)):
+        # Retiring some other obsolete journal cannot license replay of this
+        # batch's own unknown attempt. Its evidence must be reconciled first.
+        return 2, "this batch has an uncertain prior attempt without its matching journal; no input was pasted"
 
     def same_session():
         return load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id") == identity
@@ -345,14 +453,7 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
         run(["sleep", str(seconds)], check=True)
 
     def snapshot(owned=False):
-        metadata = command("display-message", "-p", "-t", f"=hive-{member}:0.0", "#{cursor_y} #{pane_in_mode} #{pane_id}").stdout.strip().split()
-        if not metadata or not metadata[0].isdigit() or (len(metadata) > 1 and metadata[1] != "0"):
-            return None, None
-        screen = command("capture-pane", "-p", "-t", f"=hive-{member}:0.0").stdout.splitlines()
-        # Reject cursor/focus/mode changes between the separate tmux reads.
-        if command("display-message", "-p", "-t", f"=hive-{member}:0.0", "#{cursor_y} #{pane_in_mode} #{pane_id}").stdout.strip().split() != metadata:
-            return None, None
-        return composer(screen, int(metadata[0]), owned=owned, expected=message if owned else None), metadata[-1] if len(metadata) > 2 else None
+        return terminal_snapshot(member, run, owned=owned, expected=message if owned else None)
 
     def saved(stage, **extra):
         if previous.get("stage") != stage:
@@ -385,7 +486,17 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
             atomic(path / "journal-prompt-receipt.json", proof)
     if previous and previous.get("stage") != "acknowledged" and acknowledged():
         saved("acknowledged")
+    if previous and previous.get("stage") not in ("acknowledged", "retired") and closed_journal_proof(root, member, previous):
+        retired, reason = retire_closed_delivery(root, member, previous, run=run)
+        if not retired:
+            return 3, f"closed old request awaits safe retirement: {reason}; no input was pasted"
+        previous = retired
     same = previous.get("hash") == key and previous.get("ids") == ids
+    if previous.get("stage") == "retired":
+        if same:
+            return 3, "obsolete request is retired; submission remains unproven; no input was pasted"
+        audit_record(path, "replace-retired", previous)
+        previous = {}
     if previous and previous.get("stage") != "acknowledged":
         # A hook can hand off the old request without submitting its terminal
         # draft. That is not a prompt ACK. Retire this obsolete transport only
@@ -403,6 +514,8 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
             previous = {}
         if not same or previous.get("session_id") != identity:
             if previous:
+                if not same:
+                    return 3, "another delivery is pending; this new batch received no input; inspect the old journal"
                 return 2, "another delivery is pending or the session changed; inspect its terminal"
     elif same and (ids or not was_acknowledged) and previous.get("session_id") == identity:
         return 0, "submission already acknowledged"

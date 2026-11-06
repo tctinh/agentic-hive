@@ -181,7 +181,7 @@ class PromptTests(unittest.TestCase):
         self.retained_old_batch()
         atomic(self.root / "members/bob/state/delivery.json", {
             "cursor":999999})
-        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.send("different request")[0],3)
         self.assertEqual(self.stage(),"pasted")
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
 
@@ -266,7 +266,7 @@ class PromptTests(unittest.TestCase):
         (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + prompt.prompt_hash("another prompt"))
         atomic(self.root / "members/bob/state/delivery.json", {
             "cursor":999999})
-        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.send("different request")[0],3)
         self.assertEqual(self.stage(),"pasted")
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
 
@@ -274,7 +274,7 @@ class PromptTests(unittest.TestCase):
         old_hash = self.retained_old_batch()
         (self.root / "members/bob/state/last-submitted-prompt").write_text("950000000000000000 " + old_hash)
         atomic(self.root / "telemetry/members/bob.json", {"session_id":"other-session", "status":"idle"})
-        self.assertEqual(self.send("different request")[0],2)
+        self.assertEqual(self.send("different request")[0],3)
         self.assertEqual(self.stage(),"pasted")
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(0,0))
 

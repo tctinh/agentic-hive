@@ -1138,7 +1138,13 @@ def dispatch(root, row, *, retry=False):
                                     not deliverable(root, reg, rows, r, member)
                                     or not actionable(rows, r, member))}
             pending["ids"] = [id for id in pending["ids"] if id not in retired]
-            if pending.get("batch") and all(id in handed for id in pending["batch"]["ids"]):
+            known = {r["id"]: r for r in rows}
+            if pending.get("batch") and all(id in handed or (
+                id in known and known[id]["kind"] == "request" and resolved(rows, known[id], member))
+                for id in pending["batch"]["ids"]):
+                # Closing every request makes this queued batch obsolete, not
+                # acknowledged. The sender still must safely retire any old
+                # journal and inspect the current composer before new input.
                 pending.pop("batch")
                 pending["attempted"] = False
             pending["ids"] = list(dict.fromkeys([*pending["ids"], row["id"]]))
@@ -1152,6 +1158,7 @@ def dispatch(root, row, *, retry=False):
                 atomic(path / "pending-wake.json", pending)
                 report["queued"].append(member)
                 continue
+            retry_uncertain = pending["attempted"]
             pending["attempted"] = True
             atomic(path / "pending-wake.json", pending)
             if pending.get("batch") and any(
@@ -1184,7 +1191,8 @@ def dispatch(root, row, *, retry=False):
                 capture_output=True,
                 text=True,
                 timeout=85,
-                env=dict(os.environ, HIVE_DELIVERY_REQUIRE_IDLE="1"),
+                env=dict(os.environ, HIVE_DELIVERY_REQUIRE_IDLE="1",
+                    HIVE_DELIVERY_RETRY_UNCERTAIN="1" if retry_uncertain else "0"),
             )
             if result.returncode == 0:
                 # The sender now requires UserPromptSubmit, rather than a TUI

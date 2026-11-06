@@ -16,15 +16,21 @@ printf '%s\n' '{"harness":"codex","settings":{"profile":"review","reasoning_effo
 printf '%s\n' '{"session_id":"test-session","harness":"codex"}' >"$HIVE_ROOT/telemetry/members/bob.json"
 cat >"$tmp/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-if [[ $1 == has-session ]]; then [[ ${HIVE_TEST_LIVE:-0} == 1 ]]; exit; fi
-if [[ $1 == list-panes ]]; then [[ ${HIVE_TEST_LIVE:-0} == 1 ]] && printf '%s\n' "$HIVE_TEST_AGENT_PID"; exit; fi
+if [[ $1 == has-session ]]; then [[ ${HIVE_TEST_LIVE:-0} == 1 || -f $HIVE_ROOT/test-started ]]; exit; fi
+if [[ $1 == list-panes ]]; then
+  if [[ ${HIVE_TEST_DIE_BEFORE_SEND:-0} == 1 ]]; then
+    n=$(cat "$HIVE_ROOT/liveness-checks" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$HIVE_ROOT/liveness-checks"
+    [[ $n -lt 3 ]] || exit 0
+  fi
+  [[ ${HIVE_TEST_LIVE:-0} == 1 || -f $HIVE_ROOT/test-started ]] && printf '%s\n' "$HIVE_TEST_AGENT_PID"; exit
+fi
 printf 'tmux %s\n' "$*" >>"$HIVE_TEST_LOG"
 case $1 in
   load-buffer) cat >"$HIVE_ROOT/pending-prompt"; echo 0 >"$HIVE_ROOT/enters"; rm -f "$HIVE_ROOT/queued-prompt" "$HIVE_ROOT/ack-ticks" "$HIVE_ROOT/composer-empty" "$HIVE_ROOT/pasted" ;;
   paste-buffer) touch "$HIVE_ROOT/pasted" ;;
   display-message)
-    if [[ -f $HIVE_ROOT/pasted && -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then echo 2
-    else echo 1; fi
+    if [[ -f $HIVE_ROOT/pasted && -f $HIVE_ROOT/pending-prompt && ( ${HIVE_TEST_MULTILINE:-0} == 1 || ${HIVE_TEST_WRAP:-0} == 1 ) ]]; then echo "2 0 %fixture"
+    else echo "1 0 %fixture"; fi
     ;;
   capture-pane)
     if [[ ${HIVE_TEST_DIALOG:-0} == 1 ]]; then printf 'Old transcript\nPermission required\n'; exit; fi
@@ -54,7 +60,7 @@ case $1 in
         printf '%s\n' "$(cat "$HIVE_ROOT/pending-prompt")" >>"$HIVE_ROOT/accepted-prompts"
         exit
       fi
-      jq -n --rawfile prompt "$HIVE_ROOT/pending-prompt" '{prompt: $prompt}' |
+      jq -n --rawfile prompt "$HIVE_ROOT/pending-prompt" '{prompt: $prompt, session_id: "test-session"}' |
         "$HIVE_TEST_HOOK" "${HIVE_TEST_HARNESS:-codex}" UserPromptSubmit >/dev/null
       printf '%s\n' "$(cat "$HIVE_ROOT/pending-prompt")" >>"$HIVE_ROOT/accepted-prompts"
       touch "$HIVE_ROOT/composer-empty"
@@ -65,9 +71,12 @@ EOF
 cat >"$tmp/bin/hive-launch" <<'EOF'
 #!/usr/bin/env bash
 printf 'launch %s\n' "$*" >>"$HIVE_TEST_LOG"
-if [[ ${HIVE_TEST_NO_ACK:-0} != 1 ]]; then
-  jq -n --arg prompt "${@: -1}" '{prompt: $prompt}' | "$HIVE_TEST_HOOK" codex UserPromptSubmit >/dev/null
-fi
+touch "$HIVE_ROOT/test-started"
+# The fake process is this test's bash, while the launch invocation above still
+# records the real requested harness and flags.
+jq '.harness="bash"' "$HIVE_ROOT/members/bob/state/launch.json" >"$HIVE_ROOT/fake-launch.json"
+mv "$HIVE_ROOT/fake-launch.json" "$HIVE_ROOT/members/bob/state/launch.json"
+jq -n --arg event_id "$(date +%s%N)" '{harness:"bash", session_id:"test-session",status:"working",last_event:"SessionStart",event_id:$event_id}' >"$HIVE_ROOT/telemetry/members/bob.json"
 EOF
 cat >"$tmp/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
@@ -75,7 +84,7 @@ printf 'sleep %s\n' "$*" >>"$HIVE_TEST_LOG"
 if [[ ${HIVE_TEST_ACK_DELAY_N:-0} -gt 0 && -f $HIVE_ROOT/queued-prompt ]]; then
   n=$(cat "$HIVE_ROOT/ack-ticks" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$HIVE_ROOT/ack-ticks"
   if [[ $n == "$HIVE_TEST_ACK_DELAY_N" ]]; then
-    jq -n --rawfile prompt "$HIVE_ROOT/pending-prompt" '{prompt: $prompt}' |
+    jq -n --rawfile prompt "$HIVE_ROOT/pending-prompt" '{prompt: $prompt, session_id: "test-session"}' |
       "$HIVE_TEST_HOOK" codex UserPromptSubmit >/dev/null
   fi
 fi
@@ -84,19 +93,24 @@ chmod +x "$tmp/bin/"*
 export PATH="$tmp/bin:$repo/bin:$PATH"
 "$repo/bin/hive" init >/dev/null
 "$repo/bin/hive-member" send bob 'do the next task' >/dev/null
-rg -q '^launch bob codex .* -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects do the next task$' "$HIVE_TEST_LOG"
-printf 'cold wake delivered initial prompt\n'
+rg -q '^launch bob codex .* -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects$' "$HIVE_TEST_LOG"
+[[ $(rg -c '^tmux paste-buffer' "$HIVE_TEST_LOG") == 1 ]]
+printf 'cold wake uses journaled sender after launch without task input\n'
+rm -f "$HIVE_ROOT/test-started"
 if HIVE_TEST_NO_ACK=1 "$repo/bin/hive-member" send bob 'a cold wake without acknowledgement' >"$tmp/out" 2>"$tmp/error"; then
   echo 'unconfirmed cold wake unexpectedly succeeded' >&2; exit 1
 fi
 rg -q 'unconfirmed' "$tmp/error"
 printf 'unconfirmed cold wake reported\n'
+rm -f "$HIVE_ROOT/members/bob/state/prompt-delivery.json" "$HIVE_ROOT/test-started" "$HIVE_ROOT/pasted" "$HIVE_ROOT/pending-prompt"
 
+jq '.harness="codex"' "$HIVE_ROOT/members/bob/state/launch.json" >"$HIVE_ROOT/fake-launch.json"
+mv "$HIVE_ROOT/fake-launch.json" "$HIVE_ROOT/members/bob/state/launch.json"
 mkdir -p "$HIVE_ROOT/projects/poke"
 "$repo/bin/hive-member" configure bob --name cedar --team poke --dir "$HIVE_ROOT/projects/poke" >/dev/null
 : >"$HIVE_TEST_LOG"
 "$repo/bin/hive-member" send cedar 'continue in the saved folder' >/dev/null
-rg -q '^launch bob codex '"$HIVE_ROOT"'/projects/poke -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects/poke continue in the saved folder$' "$HIVE_TEST_LOG"
+rg -q '^launch bob codex '"$HIVE_ROOT"'/projects/poke -- --profile review -c model_reasoning_effort=high resume test-session --cd '"$HIVE_ROOT"'/projects/poke$' "$HIVE_TEST_LOG"
 [[ ! -d $HIVE_ROOT/members/cedar ]]
 printf 'renamed member wakes its original conversation in the selected project folder\n'
 
@@ -109,6 +123,12 @@ rg -q '^tmux paste-buffer -d -p -r -b hive-send-[0-9]+ -t =hive-bob:0.0$' "$HIVE
 rg -q '^tmux send-keys .* Enter$' "$HIVE_TEST_LOG"
 [[ $(rg -c '^tmux send-keys' "$HIVE_TEST_LOG") == 1 ]]
 printf 'live member submission confirmed by hook\n'
+
+: >"$HIVE_TEST_LOG"
+if HIVE_TEST_LIVE=1 HIVE_TEST_DIE_BEFORE_SEND=1 "$repo/bin/hive-member" send bob 'agent died before input' >"$tmp/out" 2>"$tmp/error"; then exit 1; else [[ $? == 3 ]]; fi
+rg -q 'no running agent; no input was pasted' "$tmp/error"
+if rg -q '^tmux (load-buffer|paste-buffer|send-keys)' "$HIVE_TEST_LOG"; then echo 'input attempted after agent died' >&2; exit 1; fi
+printf 'agent death before send is an explicit no-input outcome\n'
 
 : >"$HIVE_TEST_LOG"
 HIVE_TEST_LIVE=1 HIVE_TEST_DROP_ENTER=1 "$repo/bin/hive-member" send bob 'retry the swallowed Enter' >/dev/null
@@ -229,6 +249,7 @@ printf 'autonomous launch flags applied\n'
 mkdir -p "$HIVE_ROOT/members/bob/notes" "$HIVE_ROOT/claims/demo"
 printf 'keep work here\n' >"$HIVE_ROOT/members/bob/notes/work.md"
 printf 'bob\n' >"$HIVE_ROOT/claims/demo/owner"
+rm -f "$HIVE_ROOT/test-started"
 "$repo/bin/hive-member" delete bob >/dev/null
 [[ ! -e $HIVE_ROOT/members/bob && ! -e $HIVE_ROOT/telemetry/members/bob.json && ! -e $HIVE_ROOT/claims/demo ]]
 printf 'delete removes member session state and claims\n'

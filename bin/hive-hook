@@ -79,13 +79,16 @@ telemetry() { # status
     --arg started "$started" --arg now "$(date --iso-8601=seconds)" \
     --arg cwd "$cwd" --arg branch "$branch" --arg tool "$(field .tool_name)" \
     --arg session "$(field .session_id)" \
+    --arg event "$event" --arg event_id "$(date +%s%N)" \
     --argjson delivered "$(read_int "$cursor_file")" '
       {
         member: $member,
         harness: $harness,
         status: $status,
+        last_event: $event,
+        event_id: $event_id,
         pid: ($pid | tonumber? // null),
-        session_id: (if $session == "" then $prev.session_id else $session end),
+        session_id: (if $session != "" then $session elif $event == "SessionStart" then null else $prev.session_id end),
         started_at: (if $started == "" then null else $started end),
         last_activity: $now,
         cwd: $cwd,
@@ -100,12 +103,16 @@ telemetry() { # status
 # Confirm terminal submission without retaining prompt contents. Kept separate
 # from passive telemetry so overlapping hook events cannot overwrite it.
 record_prompt() {
-  local tmp hash
+  local tmp hash marker
   jq -e '.prompt | type == "string"' <<<"$input" >/dev/null 2>&1 || return 0
   hash=$(jq -jr '.prompt | gsub("^\\s+|\\s+$"; "")' <<<"$input" | sha256sum | cut -d' ' -f1) || return 0
   tmp=$(mktemp "$nest/state/last-submitted-prompt.XXXXXX") || return 0
-  printf '%s %s\n' "$(date +%s%N)" "$hash" >"$tmp" &&
+  marker="$(date +%s%N) $hash"
+  printf '%s\n' "$marker" >"$tmp" &&
     chmod 0664 "$tmp" && mv -f "$tmp" "$nest/state/last-submitted-prompt" || rm -f "$tmp"
+  tmp=$(mktemp "$nest/state/last-submitted-prompt.json.XXXXXX") || return 0
+  jq --arg receipt "$marker" '{receipt: $receipt, session_id: .session_id, event: "UserPromptSubmit"}' <<<"$input" >"$tmp" &&
+    chmod 0664 "$tmp" && mv -f "$tmp" "$nest/state/last-submitted-prompt.json" || rm -f "$tmp"
 }
 
 emit() { # additionalContext for this event

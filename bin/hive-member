@@ -13,6 +13,8 @@
 #   hive-member delete <member> [--force]
 #                                         remove its session, claims, nest and telemetry
 #   hive-member send <member> <message> wake if needed and start work
+#   hive-member delivery-status <member> inspect evidence without sending input
+#   hive-member delivery-reconcile <member> confirm exact proof without input
 #   hive-member rename <member> <name>  change its public name, preserving session
 #   hive-member team <member> <team>    assign a team tag (empty string clears)
 #   hive-member configure <member> [--name <name>] [--team <team>] [--dir <dir>]
@@ -136,32 +138,17 @@ cmd_delete() {
   say "deleted $m (Room history retained)"
 }
 
-confirm_prompt() {
-  local m="$1" message="$2" before="$3" receipt hash
-  hash=$(printf '%s' "$message" | jq -Rrjs 'gsub("^\\s+|\\s+$"; "")' | sha256sum | cut -d' ' -f1)
-  for _ in $(seq 180); do
-    sleep 0.25
-    receipt=$(cat "$HIVE_ROOT/members/$m/state/last-submitted-prompt" 2>/dev/null || true)
-    if [[ $receipt != "$before" && ${receipt#* } == "$hash" ]]; then
-      say "sent message to $m (submission confirmed)"
-      return 0
-    fi
-  done
-  printf 'hive-member: submission to %s is unconfirmed; inspect its terminal before resending\n' "$m" >&2
-  return 2
-}
-
 send_prompt() {
-  harness_alive "$1" || die "$1 has no running agent to receive the message"
+  harness_alive "$1" || { printf 'hive-member: %s has no running agent; no input was pasted\n' "$1" >&2; return 3; }
   python3 "${MEMBER_HELPER%/*}/hive_prompt.py" "$1" "$2"
 }
 
 cmd_wake() (
-  local m="$1" fresh="$2" message="${3:-}" no_attach="${4:-0}" harness dir sid before args=()
+  local m="$1" fresh="$2" message="${3:-}" no_attach="${4:-0}" harness dir sid startup_before startup_event args=()
   # Serialize the entire wake/paste/submit exchange, including cold starts.
   if [[ -n $message ]]; then
     exec 7>>"$HIVE_ROOT/members/$m/state/.prompt.lock"
-    flock -w 90 7 || die "another prompt to $m is still being delivered"
+    flock -w 5 7 || { printf 'hive-member: another prompt to %s is still being delivered; no input was pasted\n' "$m" >&2; return 3; }
   fi
   # A newly launched harness may not have fired SessionStart yet. Do not
   # mistake that short gap for a dead pane and kill it before it gets a prompt.
@@ -200,10 +187,22 @@ cmd_wake() (
   else
     say "waking $m ($harness in $dir) with a fresh conversation"
   fi
-  [[ -z $message ]] || args+=("$message")
-  before=$(cat "$HIVE_ROOT/members/$m/state/last-submitted-prompt" 2>/dev/null || true)
+  # Start without task input. SessionStart must establish identity before the
+  # same journaled sender used for live sessions may paste anything.
+  startup_before=$(tele "$m" .event_id)
   HIVE_LAUNCH_NO_ATTACH=1 hive-launch "$m" "$harness" "$dir" -- "${args[@]}" 7>&-
-  [[ -z $message ]] || confirm_prompt "$m" "$message" "$before"
+  if [[ -n $message ]]; then
+    for _ in $(seq 40); do
+      startup_event=$(tele "$m" .event_id)
+      if harness_alive "$m" && [[ -n $(tele "$m" .session_id) && -n $startup_event && $startup_event != "$startup_before" && $(tele "$m" .last_event) == SessionStart ]]; then break; fi
+      sleep 0.25
+    done
+    if ! harness_alive "$m" || [[ -z $(tele "$m" .session_id) || -z $startup_event || $startup_event == "$startup_before" || $(tele "$m" .last_event) != SessionStart ]]; then
+      printf 'hive-member: session identity is not ready; no input was pasted\n' >&2
+      return 3
+    fi
+    HIVE_DELIVERY_STARTUP_EVENT="$startup_event" send_prompt "$m" "$message"
+  fi
   exec 7>&-
   ((no_attach)) || attach "$m"
 )
@@ -250,6 +249,14 @@ if [[ -n $member && $member != beekeeper && ! -f $HIVE_ROOT/beekeepers/$member/s
 fi
 
 case $verb in
+  delivery-status | delivery-reconcile)
+    require_member "$member"
+    if [[ $verb == delivery-reconcile ]]; then
+      exec 7>>"$HIVE_ROOT/members/$member/state/.prompt.lock"
+      flock -w 5 7 || die "another prompt is being delivered; inspect again later"
+    fi
+    python3 "${MEMBER_HELPER%/*}/hive_prompt.py" "$verb" "$member"
+    ;;
   status | "") cmd_status "$member" ;;
   wake | send) require_member "$member"; cmd_wake "$member" "$fresh" "$message" "$no_attach" ;;
   kill) require_member "$member"; cmd_kill "$member" "$force" ;;

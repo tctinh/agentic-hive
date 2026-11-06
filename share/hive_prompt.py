@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 from hive_runtime import atomic, load
 
@@ -35,11 +36,34 @@ def receipt_acknowledges(record, current, session_id):
         return False
     if prior and (len(prior) != 2 or not prior[0].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", prior[1])):
         return False
-    return int(fields[0]) > (int(prior[0]) if prior else 0)
+    created = record.get("created_ns", 0)
+    if not isinstance(created, int) or created < 0:
+        return False
+    return int(fields[0]) > max(int(prior[0]) if prior else 0, created)
 
 
 def receipt_binding(record):
-    return {name: record.get(name) for name in ("hash", "ids", "session_id", "receipt_before")}
+    names = ["hash", "ids", "session_id", "receipt_before"]
+    names += [name for name in ("attempt_id", "created_ns") if name in record]
+    return {name: record.get(name) for name in names}
+
+
+def current_receipt_acknowledges(record, path, session):
+    """New attempts require a session-bound hook receipt, not a bare hash slot."""
+    typed = load(path / "last-submitted-prompt.json")
+    if typed:
+        return typed.get("event") == "UserPromptSubmit" and typed.get("session_id") == session and receipt_acknowledges(record, typed.get("receipt"), session)
+    if record.get("version", 1) < 2:
+        marker = path / "last-submitted-prompt"
+        return receipt_acknowledges(record, marker.read_text().strip() if marker.exists() else "", session)
+    return False
+
+
+def audit_record(path, event, record, **evidence):
+    """Preserve each journal before replacement; never overwrite prior evidence."""
+    target = path / "delivery-audit" / (str(uuid.uuid4()) + ".json")
+    atomic(target, {"event": event, "at_ns": time.time_ns(), "journal": record, **evidence})
+    return str(target)
 
 
 def record_receipt(root, member, payload):
@@ -79,7 +103,9 @@ def native_receipt(record, cache, codex_home):
         return None
     sid = record.get("session_id")
     ids = record.get("ids")
-    if not sid or not ids or cache.get("session") != sid:
+    if (not isinstance(sid, str) or not sid.strip() or not isinstance(ids, list)
+        or cache.get("session") != sid
+        or (not ids and not record.get("created_ns"))):
         return None
     try:
         path = Path(cache.get("path", "")).resolve(strict=True)
@@ -93,9 +119,14 @@ def native_receipt(record, cache, codex_home):
             with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
                 end = len(data)
                 start = max(0, end - 64 * 1024 * 1024)
-                for _ in range(80):
-                    offset = data.rfind(ids[0].encode(), start, end)
+                # ID-less direct prompts still have an exact hash/session/time
+                # binding. Inspect bounded complete user records, never infer
+                # submission from a quoted body, a cursor or an assistant reply.
+                for _ in range(80 if ids else 20000):
+                    offset = data.rfind(ids[0].encode(), start, end) if ids else data.rfind(b"\n", start, max(start, end - 1)) + 1
                     if offset < 0:
+                        break
+                    if not ids and (offset < start or end <= start):
                         break
                     first = data.rfind(b"\n", start, offset) + 1
                     last = data.find(b"\n", offset)
@@ -127,6 +158,51 @@ def native_receipt(record, cache, codex_home):
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     return None
+
+
+def delivery_status(root, member):
+    """Read-only evidence report. Absence of proof never means non-delivery."""
+    path = Path(root) / "members" / member / "state"
+    record = load(path / "prompt-delivery.json")
+    telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
+    session = telemetry.get("session_id")
+    proof = None
+    stable = isinstance(session, str) and bool(session.strip()) and record.get("session_id") == session
+    confirmed = bool(record and stable and (current_receipt_acknowledges(record, path, session)
+        or proof_acknowledges(record, load(path / "journal-prompt-receipt.json"), session)))
+    if record and stable and not confirmed and telemetry.get("harness") == "codex":
+        proof = native_receipt(record, load(path / "quota-cache.json"),
+            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        confirmed = proof_acknowledges(record, proof, session)
+    received = load(path / "delivery.json").get("request_receipts", [])
+    pending = load(path / "pending-wake.json")
+    return {"member": member, "journal": record, "current_session": session,
+        "pending_ids": pending.get("ids", []), "attempted": pending.get("attempted", False),
+        "last_outcome": load(path / "delivery-outcome.json"),
+        "submission_proven": confirmed, "native_proof": proof,
+        "hook_handoff": bool(record.get("ids") and all(id in received for id in record["ids"])),
+        "status": "no-journal" if not record else "submission-proven" if confirmed else "inspection-required",
+        "reason": None if confirmed or not record else
+            "missing or changed session identity" if not stable else "no exact submission proof; preserve the draft and do not resend"}
+
+
+def reconcile_delivery(root, member):
+    """Caller holds .prompt.lock. Confirm evidence only; no terminal mutation."""
+    report = delivery_status(root, member)
+    if not report["submission_proven"]:
+        return report
+    path = Path(root) / "members" / member / "state"
+    record = report["journal"]
+    if record.get("stage") != "acknowledged":
+        # Persist the proof and original before changing the active stage.
+        report["audit"] = audit_record(path, "reconcile-submission", record,
+            proof=report["native_proof"] or load(path / "journal-prompt-receipt.json"),
+            hook_receipt=load(path / "last-submitted-prompt.json"),
+            legacy_receipt=(path / "last-submitted-prompt").read_text() if (path / "last-submitted-prompt").exists() else None)
+        if report["native_proof"]:
+            atomic(path / "journal-prompt-receipt.json", report["native_proof"])
+        atomic(path / "prompt-delivery.json", dict(record, stage="acknowledged"))
+    return report
 
 
 def normalized(text):
@@ -242,12 +318,25 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
     key = prompt_hash(message)
     ids = re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", message, re.M)
     previous = load(journal)
+    was_acknowledged = previous.get("stage") == "acknowledged"
+
+    if not isinstance(identity, str) or not identity.strip():
+        return 3, "session identity is not ready; no input was pasted"
+
+    def same_session():
+        return load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id") == identity
 
     def receipt():
         return receipt_file.read_text().strip() if receipt_file.exists() else ""
 
     def busy():
-        return require_idle and load(Path(root) / "telemetry/members" / f"{member}.json").get("status") == "working"
+        current = load(Path(root) / "telemetry/members" / f"{member}.json")
+        if current.get("session_id") != identity:
+            return True
+        initializing = (os.environ.get("HIVE_DELIVERY_STARTUP_EVENT")
+            and current.get("event_id") == os.environ["HIVE_DELIVERY_STARTUP_EVENT"]
+            and current.get("last_event") == "SessionStart")
+        return require_idle and current.get("status") == "working" and not initializing
 
     def command(*args, input=None):
         return run(["tmux", *args], input=input, text=True, capture_output=True, check=True)
@@ -266,13 +355,23 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
         return composer(screen, int(metadata[0]), owned=owned, expected=message if owned else None), metadata[-1] if len(metadata) > 2 else None
 
     def saved(stage, **extra):
+        if previous.get("stage") != stage:
+            audit_record(path, "stage-" + stage, dict(previous), next_stage=stage,
+                hook_receipt=load(path / "last-submitted-prompt.json"),
+                proof=load(path / "journal-prompt-receipt.json"))
         previous.update(stage=stage, **extra)
         atomic(journal, previous)
 
     def acknowledged():
         active = load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id")
-        return receipt_acknowledges(previous, receipt(), active) or proof_acknowledges(
+        return current_receipt_acknowledges(previous, path, active) or proof_acknowledges(
             previous, load(path / "journal-prompt-receipt.json"), active)
+
+    if previous.get("stage") == "queued" and previous.get("session_id") != identity:
+        # queued is written only before any paste invocation. Unlike pasted,
+        # this is an explicit no-input attempt and can start in a new session.
+        audit_record(path, "replace-no-input-session", previous)
+        previous = {}
 
     # A manually submitted old batch may have an exact receipt even though the
     # sender was not running to retire its journal. Check it before rejecting
@@ -286,7 +385,7 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
             atomic(path / "journal-prompt-receipt.json", proof)
     if previous and previous.get("stage") != "acknowledged" and acknowledged():
         saved("acknowledged")
-    same = previous.get("hash") == key
+    same = previous.get("hash") == key and previous.get("ids") == ids
     if previous and previous.get("stage") != "acknowledged":
         # A hook can hand off the old request without submitting its terminal
         # draft. That is not a prompt ACK. Retire this obsolete transport only
@@ -300,13 +399,16 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
                 return 3, "old request reached a hook, but the composer is not empty; no input was pasted"
             atomic(path / "retired-prompt-delivery.json", dict(previous,
                 stage="retired", reason="request handed off through hook; prompt submission unproven"))
+            audit_record(path, "retire-hook-handoff", previous)
             previous = {}
         if not same or previous.get("session_id") != identity:
             if previous:
                 return 2, "another delivery is pending or the session changed; inspect its terminal"
-    elif same and ids and previous.get("ids") == ids and previous.get("session_id") == identity:
+    elif same and (ids or not was_acknowledged) and previous.get("session_id") == identity:
         return 0, "submission already acknowledged"
     else:
+        if previous:
+            audit_record(path, "replace-acknowledged", previous)
         previous = {}
 
     if not previous or previous.get("stage") == "queued":
@@ -322,7 +424,12 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
             return 3, "no ready prompt composer; no input was pasted"
         if not empty(ready):
             return 3, "composer contains an unrelated draft; no input was pasted"
-        previous = {"hash": key, "ids": ids, "session_id": identity, "pane_id": pane, "receipt_before": receipt(), "stage": "queued"}
+        if not pane or not same_session():
+            return 3, "session or pane identity changed before paste; no input was pasted"
+        if previous:
+            audit_record(path, "replace-queued", previous)
+        previous = {"version": 2, "attempt_id": str(uuid.uuid4()), "created_ns": time.time_ns(),
+            "hash": key, "ids": ids, "session_id": identity, "pane_id": pane, "receipt_before": receipt(), "stage": "queued"}
         atomic(journal, previous)
         buffer = f"hive-send-{os.getpid()}"
         try:
@@ -331,10 +438,13 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
             return 3, "could not load message; no input was pasted"
         # Recheck after loading; user typing can race with buffer creation.
         draft, current_pane = snapshot()
-        if not empty(draft) or current_pane != pane or busy():
+        if not empty(draft) or current_pane != pane or busy() or not same_session():
             return 3, "composer changed before paste; no input was pasted"
         # Write before the terminal mutation: an interrupted paste is ambiguous.
         saved("pasted")
+        if not same_session() or busy():
+            saved("queued", no_input=True)
+            return 3, "session or turn changed before paste; no input was pasted"
         try:
             command("paste-buffer", "-d", "-p", "-r", "-b", buffer, "-t", f"=hive-{member}:0.0")
         except (OSError, subprocess.CalledProcessError):
@@ -349,9 +459,11 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
         if acknowledged():
             saved("acknowledged")
             return 0, "submission confirmed"
-        if load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id") != previous.get("session_id"):
+        if not same_session():
             return 2, "session changed during delivery; inspect its terminal"
         draft, pane = snapshot(owned=True)
+        if not same_session():
+            return 2, "session changed during composer inspection; no Enter sent"
         ours = draft is not None and (matches(draft, message) or (collapsed(draft) and previous.get("collapsed_view") == normalized("\n".join(draft))))
         if pane == previous.get("pane_id") and ours and previous.get("stage") != "accepted" and not busy():
             cleared = 0
@@ -378,6 +490,11 @@ def main():
             return 0
         record_receipt(os.environ.get("HIVE_ROOT", "/srv/hive"), member, json.load(sys.stdin))
         return 0
+    if len(sys.argv) == 3 and sys.argv[1] in ("delivery-status", "delivery-reconcile"):
+        root = os.environ.get("HIVE_ROOT", "/srv/hive")
+        report = (delivery_status if sys.argv[1] == "delivery-status" else reconcile_delivery)(root, sys.argv[2])
+        print(json.dumps(report))
+        return 2 if sys.argv[1] == "delivery-reconcile" and report["status"] == "inspection-required" else 0
     try:
         code, detail = send(os.environ.get("HIVE_ROOT", "/srv/hive"), sys.argv[1], sys.argv[2], require_idle=os.environ.get("HIVE_DELIVERY_REQUIRE_IDLE") == "1")
     except (OSError, subprocess.CalledProcessError, ValueError) as error:

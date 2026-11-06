@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -40,7 +41,10 @@ class Terminal:
 
     def acknowledge(self):
         self.draft = ""
-        (self.root / "members/bob/state/last-submitted-prompt").write_text(f"{1000000000000000000 + self.ticks} {prompt.prompt_hash(self.message)}\n")
+        marker = f"{time.time_ns() + self.ticks} {prompt.prompt_hash(self.message)}"
+        (self.root / "members/bob/state/last-submitted-prompt").write_text(marker + "\n")
+        atomic(self.root / "members/bob/state/last-submitted-prompt.json", {
+            "receipt": marker, "session_id": "fixture-session", "event": "UserPromptSubmit"})
 
     def run(self, args, **kwargs):
         self.calls.append(args)

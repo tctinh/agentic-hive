@@ -347,6 +347,11 @@ its tool activity, and its responses. Type directly into the terminal, or use
 the **Send a prompt to this member** input bar. Font-size and fit controls help
 on smaller screens. Closing the browser terminal leaves the member running.
 
+For uncertain delivery, `hive-member delivery-status MEMBER` inspects the retained
+evidence without sending input. `hive-member delivery-reconcile MEMBER` can
+confirm an existing exact submission proof; ambiguous drafts remain blocked.
+See the [delivery recovery and NixOS handoff notes](docs/delivery-reconciliation.md).
+
 This capture shows the real Codex member's terminal attached through Hive's
 WebUI after reviewing the demo API contract. The input bar contains an unsent
 follow-up prompt:
@@ -538,6 +543,7 @@ python3 test/web.py
 python3 test/config.py
 python3 test/runtime.py
 python3 test/messages.py
+PYTHONPATH=test python3 -m unittest delivery_reconciliation
 python3 test/village.py
 python3 test/delegation.py
 nix-shell -p 'python3.withPackages (p: [ p.markdown-it-py ])' --run 'python3 test/devlogs.py'

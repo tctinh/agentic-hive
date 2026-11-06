@@ -324,10 +324,8 @@ def reconcile(rows, member, value, status=None):
     value["assigned_requests"] = [
         id for id, r in requests.items() if member in r.get("recipients", []) and member not in closed[id]
     ]
-    assigned = set(value["assigned_requests"])
-    value["request_receipts"] = [
-        id for id in value.get("request_receipts", []) if id in assigned
-    ]
+    # Assignment closure must not erase evidence needed by an old transport.
+    value["request_receipts"] = list(dict.fromkeys(value.get("request_receipts", [])))
 
 
 def context_signature(root):
@@ -1085,16 +1083,12 @@ def journal_handed_off(path, telemetry):
 
 def journal_submission_proven(path, telemetry):
     """Let the guarded sender reconcile a confirmed, mismatched old journal."""
-    from hive_prompt import native_receipt, proof_acknowledges, receipt_acknowledges
+    from hive_prompt import native_receipt, proof_acknowledges, current_receipt_acknowledges
     journal = load(path / "prompt-delivery.json")
     session = telemetry.get("session_id")
     if not session or not journal or journal.get("session_id") != session:
         return False
-    try:
-        marker = (path / "last-submitted-prompt").read_text().strip()
-    except OSError:
-        marker = ""
-    if (receipt_acknowledges(journal, marker, session)
+    if (current_receipt_acknowledges(journal, path, session)
         or proof_acknowledges(journal, load(path / "journal-prompt-receipt.json"), session)):
         return True
     if telemetry.get("harness") != "codex":
@@ -1223,8 +1217,14 @@ def dispatch(root, row, *, retry=False):
                     or result.stdout.strip()
                     or "session delivery failed; message queued"
                 )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            # A timeout does not establish whether paste or Enter happened.
+            report["unconfirmed"][member] = f"delivery wait timed out after {error.timeout}s; transport outcome unknown; inspect delivery-status before retrying"
+        except OSError as error:
             report["failed"][member] = str(error)
+        outcome = next((category for category in ("sent", "queued", "failed", "unconfirmed") if member in report[category]), "unknown")
+        atomic(path / "delivery-outcome.json", {"at_ns": time.time_ns(), "ids": ids,
+            "outcome": outcome, "detail": report[outcome].get(member) if isinstance(report.get(outcome), dict) else None})
     return report
 
 

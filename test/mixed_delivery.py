@@ -47,6 +47,7 @@ elif command=="send-keys":
  if os.environ.get("HIVE_TEST_UNCONFIRMED")!="1":
   prompt=(root/"terminal-prompt").read_text()
   (state/"last-submitted-prompt").write_text(str(time.time_ns())+" "+hashlib.sha256(prompt.strip().encode()).hexdigest()+"\\n")
+  (state/"last-submitted-prompt.json").write_text(json.dumps({"receipt":(state/"last-submitted-prompt").read_text().strip(),"session_id":"synthetic-session","event":"UserPromptSubmit"}))
   if os.environ.get("HIVE_TEST_CALLBACK")=="1":
    if os.environ.get("HIVE_TEST_NEW_REQUEST")=="1":
     sys.path.insert(0,os.environ["HIVE_SHARE"])

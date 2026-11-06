@@ -179,6 +179,8 @@ class MessageTests(unittest.TestCase):
         row = self.post("accepted by composer", channel="dm", kind="request", recipients=["bob"])
         with patch("hive_messages.subprocess.run") as run:
             run.return_value.returncode = 2
+            run.return_value.stderr = "submission unconfirmed"
+            run.return_value.stdout = ""
             run.return_value.stderr = "processing acknowledgment pending"
             messages.dispatch(self.root, row)
         self.assertTrue((self.root / "members/bob/state/pending-wake.json").exists())
@@ -215,6 +217,8 @@ class MessageTests(unittest.TestCase):
         row = self.post("first", channel="dm", kind="request", recipients=["bob"])
         with patch("hive_messages.subprocess.run") as run:
             run.return_value.returncode = 2
+            run.return_value.stderr = "submission unconfirmed"
+            run.return_value.stdout = ""
             run.return_value.stderr = "processing acknowledgment pending"
             messages.dispatch(self.root, row)
             value = messages.state(self.root, "bob")
@@ -228,6 +232,8 @@ class MessageTests(unittest.TestCase):
         row = self.post("old", channel="dm", kind="request", recipients=["bob"])
         with patch("hive_messages.subprocess.run") as run:
             run.return_value.returncode = 2
+            run.return_value.stderr = "submission unconfirmed"
+            run.return_value.stdout = ""
             messages.dispatch(self.root, row)
             messages.drain(self.root, "bob")
             self.assertEqual(run.call_count, 1)
@@ -239,6 +245,8 @@ class MessageTests(unittest.TestCase):
         path = self.root / "members/bob/state"
         with patch("hive_messages.subprocess.run") as run:
             run.return_value.returncode = 2
+            run.return_value.stderr = "submission unconfirmed"
+            run.return_value.stdout = ""
             run.return_value.stderr = "paste retained"
             messages.dispatch(self.root, first)
             batch = json.loads((path / "pending-wake.json").read_text())["batch"]
@@ -263,6 +271,8 @@ class MessageTests(unittest.TestCase):
         path = self.root / "members/bob/state"
         with patch("hive_messages.subprocess.run") as run:
             run.return_value.returncode = 2
+            run.return_value.stderr = "submission unconfirmed"
+            run.return_value.stdout = ""
             messages.dispatch(self.root, first)
             batch = json.loads((path / "pending-wake.json").read_text())["batch"]
             journal = {"session_id":"fixture", "stage":"pasted", "ids":batch["ids"],

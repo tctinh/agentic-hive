@@ -15,6 +15,7 @@
 #   hive-member send <member> <message> wake if needed and start work
 #   hive-member delivery-status <member> inspect evidence without sending input
 #   hive-member delivery-reconcile <member> confirm exact proof without input
+#   hive-member delivery-retire-compatible <member> audit closed work for old senders
 #   hive-member rename <member> <name>  change its public name, preserving session
 #   hive-member team <member> <team>    assign a team tag (empty string clears)
 #   hive-member configure <member> [--name <name>] [--team <team>] [--dir <dir>]
@@ -249,9 +250,9 @@ if [[ -n $member && $member != beekeeper && ! -f $HIVE_ROOT/beekeepers/$member/s
 fi
 
 case $verb in
-  delivery-status | delivery-reconcile)
+  delivery-status | delivery-reconcile | delivery-retire-compatible)
     require_member "$member"
-    if [[ $verb == delivery-reconcile ]]; then
+    if [[ $verb != delivery-status ]]; then
       exec 7>>"$HIVE_ROOT/members/$member/state/.prompt.lock"
       flock -w 5 7 || die "another prompt is being delivered; inspect again later"
     fi

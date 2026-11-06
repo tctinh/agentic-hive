@@ -1,5 +1,11 @@
 # Obsolete legacy delivery recovery — 2026-11-06 follow-up
 
+The later [operational handoff](operational-recovery.md) supersedes the recovery
+commands below. The running old sender does not understand an active `retired`
+record, and the Hive account cannot traverse the private source checkout. Use the
+tested explicit compatibility operation from an owner-built package; no live
+recovery or package build has been performed by Codex.
+
 ## Verified diagnosis
 
 The running package is

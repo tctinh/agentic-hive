@@ -222,7 +222,8 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         with patch.object(web, "member_panes", return_value={"alice": 100}), \
              patch.object(web, "pane_harness_pid", return_value=101):
             alice = next(m for m in web.members(0, 0, []) if m["member"] == "alice")
-        self.assertEqual((alice["state"], alice["pid"]), ("idle", 101))
+        self.assertEqual((alice["state"], alice["pid"]), ("unknown", 101))
+        self.assertEqual(alice["telemetry_binding"], "previous-process")
 
     def test_cross_origin_command_is_rejected(self):
         with patch.object(web, "run_hive") as run:
@@ -244,11 +245,30 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
 
     def test_stale_working_turn_keeps_guard_state_and_exposes_unknown_freshness(self):
         path=self.root/'telemetry/members/alice.json';path.parent.mkdir(parents=True,exist_ok=True)
-        path.write_text('{"status":"working","harness":"codex","last_activity":"2000-01-01T00:00:00+00:00"}')
+        path.write_text('{"status":"working","pid":123,"harness":"codex","last_activity":"2000-01-01T00:00:00+00:00"}')
         with patch.object(web,'member_panes',return_value={'alice':{}}), patch.object(web,'pane_harness_pid',return_value=123):
             member=next(m for m in web.members(0,1700000000,[]) if m['member']=='alice')
         self.assertEqual(member['state'],'working')
         self.assertEqual(member['telemetry_freshness'],'unknown')
+
+    def test_inspection_endpoint_reads_current_evidence_without_delivery(self):
+        (self.root / "telemetry/members").mkdir(parents=True, exist_ok=True)
+        (self.root / "telemetry/members/alice.json").write_text('{"pid":99999,"status":"idle"}')
+        before = {str(p): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        with patch.object(web, "member_panes", return_value={"alice":100}), patch.object(web,"pane_harness_pid",return_value=101), patch.object(web,"run_hive") as run:
+            status, data = self.get_json("/api/inspect?member=alice")
+        self.assertEqual(status,200)
+        self.assertTrue(data["read_only"])
+        self.assertEqual(data["members"][0]["state"],"unknown")
+        run.assert_not_called()
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_corrupt_delivery_file_does_not_break_member_visibility(self):
+        path=self.root/'members/alice/state/prompt-delivery.json';path.parent.mkdir(parents=True,exist_ok=True);path.write_text('{bad')
+        with patch.object(web,"member_panes",return_value={"alice":100}), patch.object(web,"pane_harness_pid",return_value=101):
+            member=next(m for m in web.members(0,0,[]) if m['member']=='alice')
+        self.assertTrue(member['running'])
+        self.assertEqual(member['delivery']['review_reason'],'delivery state unreadable')
 
     def test_member_card_uses_latest_room_message(self):
         posts = [{"member": "alice", "body": "first", "ts": "2026-10-01T10:00:00-04:00"},

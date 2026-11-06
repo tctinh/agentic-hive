@@ -41,6 +41,14 @@ def load(path, default=None):
         return {} if default is None else default
 
 
+def lifecycle_state(telemetry, live_pid):
+    """A previous process's idle/working marker cannot describe a resumed one."""
+    if not live_pid or telemetry.get("pid") != live_pid:
+        return "unknown"
+    status = telemetry.get("status")
+    return status if status in ("working", "idle") else "unknown"
+
+
 def freshness(telemetry, now=None):
     try:
         age = (time.time() if now is None else now) - datetime.fromisoformat(

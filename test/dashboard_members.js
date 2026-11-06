@@ -22,6 +22,12 @@ assert(card.includes('data-terminal="astra-master"'));
 assert(card.includes('data-action="restart"'));
 assert(!card.includes('data-action="wake"'));
 assert(card.includes('running · activity unknown'));
+renderMembers([{member: 'astra-master', state: 'unknown', running: true,
+  telemetry_binding: 'previous-process', delivery: {review_reason: 'missing journal session identity'}}]);
+card = $('members').innerHTML;
+assert(card.includes('Earlier process; current activity unknown.'));
+assert(card.includes('/api/inspect?member=astra-master'));
+assert(card.includes('Earlier send needs review.'));
 
 renderMembers([{member: 'astra-master', state: 'dead', running: false}]);
 card = $('members').innerHTML;

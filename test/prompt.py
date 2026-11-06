@@ -1,5 +1,6 @@
 """Prompt guards and interrupted retries; no sockets, processes or live input."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -54,6 +55,8 @@ class Terminal:
             if self.ack_delay and self.enters and self.ticks >= self.ack_delay:
                 self.acknowledge()
         elif args[1] == "display-message":
+            if args[-1] == "#{pane_pid}":
+                return subprocess.CompletedProcess(args, 0, str(os.getpid()), "")
             row = len(self.draft.split("\n")) if self.draft else 1
             out = f"{row} {self.mode} {self.pane}\n"
             if self.resize and self.before_capture:

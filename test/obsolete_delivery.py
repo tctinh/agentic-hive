@@ -6,6 +6,7 @@ import pwd
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -27,7 +28,7 @@ class ObsoleteDelivery(unittest.TestCase):
         messages.initialize(self.root)
         self.state = self.root / "members/bob/state"
         self.telemetry = self.root / "telemetry/members/bob.json"
-        atomic(self.telemetry, {"session_id": "fixture-session", "status": "idle", "harness": "codex"})
+        atomic(self.telemetry, {"session_id": "fixture-session", "status": "idle", "harness": "codex", "pid": os.getpid()})
         self.terminal = Terminal(self.root)
         self.request = messages.post(self.root, "alice", "old work", channel="dm", kind="request", recipients=["bob"], message_id="old")
         self.text = messages.WRAPPER + messages.envelope(self.request, 8000)
@@ -236,10 +237,10 @@ class ObsoleteDelivery(unittest.TestCase):
         fake = self.root / "bin"
         fake.mkdir()
         tmux = fake / "tmux"
-        tmux.write_text('#!/usr/bin/env bash\ncase $1 in\n display-message) echo "1 0 %fake";;\n capture-pane) printf "Transcript\\n› Ask Codex to do anything\\n";;\n *) exit 99;;\nesac\n')
+        tmux.write_text('#!/usr/bin/env bash\ncase $1 in\n display-message) if [[ ${@: -1} == "#{pane_pid}" ]]; then echo "$HIVE_TEST_AGENT_PID"; else echo "1 0 %fake"; fi;;\n capture-pane) printf "Transcript\\n› Ask Codex to do anything\\n";;\n *) exit 99;;\nesac\n')
         tmux.chmod(0o755)
         env = dict(os.environ, HIVE_ROOT=str(self.root), HIVE_SHARE=str(SOURCE / "share"),
-            HIVE_USER=pwd.getpwuid(os.getuid()).pw_name, PATH=str(fake) + ":" + os.environ["PATH"])
+            HIVE_USER=pwd.getpwuid(os.getuid()).pw_name, HIVE_TEST_AGENT_PID=str(os.getpid()), PATH=str(fake) + ":" + os.environ["PATH"])
         result = subprocess.run([str(SOURCE / "bin/hive-member"), "delivery-reconcile", "bob"], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["status"], "retired")
@@ -260,6 +261,66 @@ class ObsoleteDelivery(unittest.TestCase):
         self.assertEqual(report["sent"], ["bob"])
         self.assertEqual((self.terminal.pastes, self.terminal.enters), (1, 1))
         self.assertEqual(messages.state(self.root, "bob")["request_receipts"], ["new"])
+
+    def test_compatible_retirement_preserves_audit_and_empty_active_slot_without_ack(self):
+        self.close()
+        report=prompt.reconcile_delivery(self.root,"bob",run=self.terminal.run,compatible=True)
+        self.assertEqual(report['status'],'retired');self.assertFalse(report['submission_proven'])
+        self.assertEqual(load(self.state/'prompt-delivery.json'),{})
+        marker=load(self.state/'last-retired-prompt-delivery.json')
+        self.assertIsNone(marker['session_id'])
+        self.assertEqual(load(marker['retirement']['audit'])['journal'],self.original)
+        self.assertTrue(prompt.delivery_status(self.root,'bob')['active_journal_empty'])
+        before=list((self.state/'delivery-audit').glob('*.json'))
+        self.assertEqual(prompt.reconcile_delivery(self.root,'bob',run=self.terminal.run,compatible=True)['status'],'retired')
+        self.assertEqual(before,list((self.state/'delivery-audit').glob('*.json')))
+        self.assert_no_input()
+
+    def test_compatible_retirement_refuses_another_unknown_queue_attempt(self):
+        self.close()
+        atomic(self.state/'pending-wake.json',{'ids':['new'],'attempted':True,'batch':{'ids':['new'],'text':'unknown new attempt'}})
+        before={str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        report=prompt.reconcile_delivery(self.root,'bob',run=self.terminal.run,compatible=True)
+        self.assertEqual(report['status'],'inspection-required')
+        self.assertIn('another queued attempt',report['reason'])
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        self.assert_no_input()
+
+    def test_new_sender_still_refuses_old_body_after_compatible_retirement(self):
+        self.close()
+        prompt.reconcile_delivery(self.root,'bob',run=self.terminal.run,compatible=True)
+        self.assertEqual(prompt.send(self.root,'bob',self.text,run=self.terminal.run)[0],3)
+        self.assert_no_input()
+
+    def test_compatible_conversion_of_retired_record_still_refuses_unknown_queue(self):
+        self.close()
+        self.assertEqual(self.reconcile()['status'],'retired')
+        active=load(self.state/'prompt-delivery.json')
+        atomic(self.state/'pending-wake.json',{'ids':['new'],'attempted':True,'batch':{'ids':['new'],'text':'unknown'}})
+        report=prompt.reconcile_delivery(self.root,'bob',run=self.terminal.run,compatible=True)
+        self.assertEqual(report['status'],'inspection-required')
+        self.assertEqual(load(self.state/'prompt-delivery.json'),active)
+
+    def test_actual_733_sender_can_send_new_work_after_compatible_retirement(self):
+        baseline=os.environ.get('HIVE_LEGACY_SOURCE')
+        if not baseline:self.skipTest('Set HIVE_LEGACY_SOURCE to the read-only 7330a09 source')
+        spec=importlib.util.spec_from_file_location('legacy_prompt_733',Path(baseline)/'share/hive_prompt.py')
+        legacy=importlib.util.module_from_spec(spec);spec.loader.exec_module(legacy)
+        fresh='[hive-message id=new]\nNew authorized task'
+        self.close()
+        self.assertEqual(legacy.send(self.root,'bob',fresh,run=self.terminal.run)[0],2)
+        self.assert_no_input()
+        report=prompt.reconcile_delivery(self.root,'bob',run=self.terminal.run,compatible=True)
+        self.assertEqual(report['status'],'retired')
+        self.assertEqual(legacy.send(self.root,'bob',fresh,run=self.terminal.run)[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        self.assertEqual(load(self.state/'prompt-delivery.json')['ids'],['new'])
+        self.assertNotIn('old',messages.state(self.root,'bob')['request_receipts'])
+
+    def test_stale_idle_pid_cannot_license_retirement(self):
+        self.close()
+        value=load(self.telemetry);value['pid']=99999999;atomic(self.telemetry,value)
+        self.assert_blocked()
 
 
 if __name__ == "__main__":

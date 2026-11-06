@@ -748,6 +748,8 @@ function renderMembers(all) {
       <dl class="kv">
         <dt>harness</dt><dd>${esc(m.harness || "–")}</dd>
         <dt>activity</dt><dd>${ago(m.last_activity)}${m.telemetry_freshness === "unknown" ? " · telemetry unknown" : ""}${m.last_tool ? " · " + esc(m.last_tool) : ""}</dd>
+        ${m.telemetry_binding === "previous-process" ? '<dt>activity source</dt><dd>Earlier process; current activity unknown.</dd>' : ''}
+        ${m.delivery?.review_reason ? `<dt>delivery</dt><dd>Earlier send needs review. Hook delivery may continue. <a href="/api/inspect?member=${encodeURIComponent(m.member)}" target="_blank" rel="noopener">Inspect evidence</a></dd>` : ''}
         <dt>worktree</dt><dd>${esc(m.cwd_short || "–")}</dd>
         ${m.workdir && m.workdir!==m.cwd ? `<dt>next folder</dt><dd>${esc(m.workdir)}</dd>` : ''}
         <dt>branch</dt><dd>${esc(m.git_branch || "–")}</dd>

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
@@ -245,6 +246,33 @@ class DeliveryReconciliation(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(load(self.state / "prompt-delivery.json")["session_id"], None)
         self.assertFalse((self.state / "delivery-audit").exists())
+
+    def test_current_send_confirms_exact_native_turn_when_hook_does_not_fire(self):
+        self.terminal.ack_delay=9999
+        home=self.root/'codex'
+        def run(args,**kwargs):
+            result=self.terminal.run(args,**kwargs)
+            if args[:2]==['tmux','send-keys']:
+                self.history(self.text,timestamp=datetime.now(timezone.utc).isoformat())
+            return result
+        with patch.dict(os.environ,CODEX_HOME=str(home)):
+            self.assertEqual(self.send(run=run)[0],0)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        self.assertFalse((self.state/'last-submitted-prompt').exists())
+        self.assertEqual(load(self.state/'journal-prompt-receipt.json')['event'],'NativeUserMessage')
+
+    def test_current_send_does_not_accept_quoted_native_text_without_hook(self):
+        self.terminal.ack_delay=9999
+        home=self.root/'codex'
+        def run(args,**kwargs):
+            result=self.terminal.run(args,**kwargs)
+            if args[:2]==['tmux','send-keys']:
+                self.history('quoted\n'+self.text,timestamp=datetime.now(timezone.utc).isoformat())
+            return result
+        with patch.dict(os.environ,CODEX_HOME=str(home)):
+            self.assertEqual(self.send(run=run)[0],2)
+        self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
+        self.assertFalse((self.state/'journal-prompt-receipt.json').exists())
 
 
 if __name__ == "__main__":

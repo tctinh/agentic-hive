@@ -60,6 +60,8 @@ sys.path.insert(0, str(SHARE if (SHARE / "hive_members.py").is_file() else BIN_D
 import hive_members
 import hive_devlogs
 import hive_messages
+import hive_inspect
+from hive_runtime import lifecycle_state
 
 
 def is_beekeeper(member):
@@ -442,8 +444,7 @@ def members(generation, now, room_entries):
         harness = launch.get("harness") or t.get("harness") or ""
         live_pid = pane_harness_pid(panes.get(name), harness)
         if live_pid:
-            recent = last is not None and now - last < WORKING_WINDOW
-            state = t.get("status") if t.get("status") in ("working", "idle") else "unknown"
+            state = lifecycle_state(t, live_pid)
         elif not t and name not in panes:
             state = "never"
         else:
@@ -460,6 +461,8 @@ def members(generation, now, room_entries):
             "state": state,
             "running": live_pid is not None,
             "telemetry_freshness": "recent" if last is not None and 0 <= now - last < WORKING_WINDOW else "unknown",
+            "telemetry_binding": "current-process" if live_pid and t.get("pid") == live_pid else "previous-process" if live_pid else "unavailable",
+            "delivery": hive_inspect.member_delivery(d / "state"),
             "harness": harness or None,
             "pid": live_pid or t.get("pid"),
             "started_at": t.get("started_at"),
@@ -600,6 +603,7 @@ def state(viewer=None):
     ms = members(generation, now, all_room)
     return {
         "hive_root": str(HIVE_ROOT),
+        "runtime": {"executable": str(Path(__file__).resolve()), "share": str(SHARE)},
         "now": datetime.now().astimezone().isoformat(timespec="seconds"),
         "generation": generation,
         "host": host(),
@@ -807,6 +811,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(state(viewer)), "application/json")
             except Exception as e:  # never take the page down; report instead
                 self._send(500, json.dumps({"error": str(e)}), "application/json")
+        elif path == "/api/inspect":
+            try:
+                query = parse_qs(url.query)
+                generation = int(read(HIVE_ROOT / ".room-generation", "0"))
+                live = members(generation, time.time(), room(limit=None))
+                report = hive_inspect.snapshot(HIVE_ROOT, member=query.get("member", [None])[0],
+                    include_all=query.get("all", ["0"])[0] == "1", web={"members": live},
+                    health={"ok": True, "runtime": {"executable": str(Path(__file__).resolve()), "share": str(SHARE)}})
+                self._send(200, json.dumps(report), "application/json")
+            except (OSError, ValueError) as error:
+                self._send(400, json.dumps({"error": str(error)}), "application/json")
         elif path in ("/api/channels", "/api/messages"):
             try:
                 query = parse_qs(url.query)

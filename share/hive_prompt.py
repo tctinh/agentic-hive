@@ -196,7 +196,7 @@ def closed_journal_proof(root, member, record):
     return {"basis": "canonical-requests-closed", "history_signature": signature, "records": evidence}
 
 
-def retire_closed_delivery(root, member, record, *, run=subprocess.run):
+def retire_closed_delivery(root, member, record, *, run=subprocess.run, compatible=False):
     """Caller holds .prompt.lock. Retire obsolete work only at a quiet target.
 
     Inspect the current target rather than adopting a missing historical session.
@@ -206,6 +206,11 @@ def retire_closed_delivery(root, member, record, *, run=subprocess.run):
     proof = closed_journal_proof(root, member, record)
     if not proof:
         return None, "no canonical closure proof for every journal ID"
+    pending_before = load(path / "pending-wake.json") if compatible else None
+    if compatible and pending_before.get("attempted"):
+        batch_ids = (pending_before.get("batch") or {}).get("ids")
+        if not batch_ids or not set(batch_ids).issubset(record["ids"]):
+            return None, "another queued attempt is uncertain; compatibility retirement refused"
     telemetry_path = Path(root) / "telemetry/members" / f"{member}.json"
     before = load(telemetry_path)
     session = before.get("session_id")
@@ -215,12 +220,16 @@ def retire_closed_delivery(root, member, record, *, run=subprocess.run):
     if not isinstance(session, str) or not session.strip() or (before.get("status") != "idle" and not initializing):
         return None, "current target must have an identified idle session"
     try:
+        pane_process = run(["tmux", "display-message", "-p", "-t", f"=hive-{member}:0.0", "#{pane_pid}"],
+            text=True, capture_output=True, check=True).stdout.strip()
+        if not pane_process.isdigit() or not process_in_pane(before.get("pid"), int(pane_process)):
+            return None, "lifecycle telemetry is not bound to the current pane process"
         first, pane = terminal_snapshot(member, run)
         second, other_pane = terminal_snapshot(member, run)
     except (OSError, subprocess.CalledProcessError) as error:
         return None, f"could not inspect current target; no retirement: {error}"
     after = load(telemetry_path)
-    if any(after.get(key) != before.get(key) for key in ("session_id", "status", "event_id", "last_event")):
+    if any(after.get(key) != before.get(key) for key in ("session_id", "status", "event_id", "last_event", "pid")):
         return None, "session or turn changed during retirement inspection"
     if not pane or pane != other_pane or not empty(first) or not empty(second):
         return None, "current composer is occupied, unavailable or changed; preserve its draft"
@@ -230,12 +239,25 @@ def retire_closed_delivery(root, member, record, *, run=subprocess.run):
         return None, "canonical history changed during retirement inspection"
     if load(path / "prompt-delivery.json") != record:
         return None, "journal changed during retirement inspection"
+    if not process_in_pane(before.get("pid"), int(pane_process)):
+        return None, "current lifecycle process changed during retirement inspection"
+    if compatible and load(path / "pending-wake.json") != pending_before:
+        return None, "queue changed during compatibility retirement inspection"
     inspection = {"session_id": session, "pane_id": pane, "status": before.get("status"),
-        "event_id": before.get("event_id"), "empty_composer_observations": 2}
-    audit = audit_record(path, "retire-closed-requests", record, closure=proof, inspection=inspection)
+        "event_id": before.get("event_id"), "pid": before.get("pid"), "pane_pid": int(pane_process), "empty_composer_observations": 2}
+    audit = audit_record(path, "retire-closed-requests-compatible" if compatible else "retire-closed-requests",
+        record, closure=proof, inspection=inspection, queue=pending_before)
     retired = dict(record, stage="retired", retirement={"reason": "canonical requests closed; submission remains unproven",
         "audit": audit, "basis": proof["basis"], "ids": record["ids"], "inspection": inspection})
-    atomic(path / "prompt-delivery.json", retired)
+    if compatible:
+        retired["retirement"]["mode"] = "legacy-empty-active"
+        # Older senders understand an empty active slot, not a retired stage.
+        # Preserve both the immutable audit and a readable retirement marker
+        # before writing that slot. No unknown attempt is discarded or ACKed.
+        atomic(path / "last-retired-prompt-delivery.json", retired)
+        atomic(path / "prompt-delivery.json", {})
+    else:
+        atomic(path / "prompt-delivery.json", retired)
     return retired, None
 
 
@@ -243,6 +265,11 @@ def delivery_status(root, member):
     """Read-only evidence report. Absence of proof never means non-delivery."""
     path = Path(root) / "members" / member / "state"
     record = load(path / "prompt-delivery.json")
+    active_empty = not record
+    if active_empty:
+        marker = load(path / "last-retired-prompt-delivery.json")
+        if marker.get("retirement", {}).get("mode") == "legacy-empty-active":
+            record = marker
     telemetry = load(Path(root) / "telemetry/members" / f"{member}.json")
     session = telemetry.get("session_id")
     proof = None
@@ -258,6 +285,7 @@ def delivery_status(root, member):
     closure = closed_journal_proof(root, member, record) if record and record.get("stage") != "acknowledged" else None
     retired = record.get("stage") == "retired" and bool(record.get("retirement"))
     return {"member": member, "journal": record, "current_session": session,
+        "active_journal_empty": active_empty,
         "pending_ids": pending.get("ids", []), "attempted": pending.get("attempted", False),
         "last_outcome": load(path / "delivery-outcome.json"),
         "submission_proven": confirmed, "native_proof": proof,
@@ -269,17 +297,25 @@ def delivery_status(root, member):
             "missing or changed session identity" if not stable else "no exact submission proof; preserve the draft and do not resend"}
 
 
-def reconcile_delivery(root, member, *, run=subprocess.run):
+def reconcile_delivery(root, member, *, run=subprocess.run, compatible=False):
     """Caller holds .prompt.lock. Confirm or retire proven obsolete work only."""
     report = delivery_status(root, member)
+    if compatible and report["active_journal_empty"] and report["status"] == "retired":
+        return report
+    if compatible and not report["active_journal_empty"] and not report["submission_proven"] and not report["closure_proof"]:
+        report.update(status="inspection-required", reason="no canonical closure proof; compatibility retirement refused")
+        return report
     if not report["submission_proven"]:
-        if report["retirement_candidate"]:
-            retired, reason = retire_closed_delivery(root, member, report["journal"], run=run)
+        if report["retirement_candidate"] or (compatible and report["closure_proof"] and report["status"] == "retired"):
+            retired, reason = retire_closed_delivery(root, member, report["journal"], run=run, compatible=compatible)
             if retired:
                 report.update(status="retired", journal=retired, retirement_candidate=False,
+                    active_journal_empty=compatible,
                     audit=retired["retirement"]["audit"], reason="closed requests retired; submission remains unproven")
             else:
                 report["reason"] = reason
+                if compatible:
+                    report["status"] = "inspection-required"
         return report
     path = Path(root) / "members" / member / "state"
     record = report["journal"]
@@ -412,6 +448,26 @@ def terminal_snapshot(member, run, *, owned=False, expected=None):
     return composer(screen, int(metadata[0]), owned=owned, expected=expected), metadata[2]
 
 
+def process_in_pane(pid, pane_pid):
+    """Reject lifecycle state left by another process, including resumed panes."""
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    for _ in range(256):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            return False
+        if re.search(r"^State:\s*[ZX]", status, re.M):
+            return False
+        if pid == pane_pid:
+            return True
+        parent = re.search(r"^PPid:\s*(\d+)$", status, re.M)
+        if not parent or int(parent[1]) <= 1 or int(parent[1]) == pid:
+            return False
+        pid = int(parent[1])
+    return False
+
+
 def send(root, member, message, *, run=subprocess.run, require_idle=False):
     path = Path(root) / "members" / member / "state"
     journal = path / "prompt-delivery.json"
@@ -421,6 +477,11 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
     key = prompt_hash(message)
     ids = re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", message, re.M)
     previous = load(journal)
+    if not previous:
+        retired = load(path / "last-retired-prompt-delivery.json")
+        if (retired.get("retirement", {}).get("mode") == "legacy-empty-active"
+            and retired.get("hash") == key and retired.get("ids") == ids):
+            return 3, "obsolete request is retired; submission remains unproven; no input was pasted"
     was_acknowledged = previous.get("stage") == "acknowledged"
 
     if not isinstance(identity, str) or not identity.strip():
@@ -463,10 +524,27 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
         previous.update(stage=stage, **extra)
         atomic(journal, previous)
 
+    last_native_check = -float("inf")
+
     def acknowledged():
+        nonlocal last_native_check
         active = load(Path(root) / "telemetry/members" / f"{member}.json").get("session_id")
-        return current_receipt_acknowledges(previous, path, active) or proof_acknowledges(
-            previous, load(path / "journal-prompt-receipt.json"), active)
+        if current_receipt_acknowledges(previous, path, active) or proof_acknowledges(
+            previous, load(path / "journal-prompt-receipt.json"), active):
+            return True
+        # A resumed harness can accept the exact user turn while its lifecycle
+        # hook is missing. Corroborate during this attempt instead of requiring
+        # a later retry/reconciliation. Composer resets alone still prove none.
+        if (telemetry.get("harness") == "codex" and active == previous.get("session_id")
+            and previous.get("stage") in ("submitted", "accepted")
+            and time.monotonic() - last_native_check >= 1):
+            last_native_check = time.monotonic()
+            proof = native_receipt(previous, load(path / "quota-cache.json"),
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+            if proof_acknowledges(previous, proof, active):
+                atomic(path / "journal-prompt-receipt.json", proof)
+                return True
+        return False
 
     if previous.get("stage") == "queued" and previous.get("session_id") != identity:
         # queued is written only before any paste invocation. Unlike pasted,
@@ -603,11 +681,12 @@ def main():
             return 0
         record_receipt(os.environ.get("HIVE_ROOT", "/srv/hive"), member, json.load(sys.stdin))
         return 0
-    if len(sys.argv) == 3 and sys.argv[1] in ("delivery-status", "delivery-reconcile"):
+    if len(sys.argv) == 3 and sys.argv[1] in ("delivery-status", "delivery-reconcile", "delivery-retire-compatible"):
         root = os.environ.get("HIVE_ROOT", "/srv/hive")
-        report = (delivery_status if sys.argv[1] == "delivery-status" else reconcile_delivery)(root, sys.argv[2])
+        report = delivery_status(root, sys.argv[2]) if sys.argv[1] == "delivery-status" else reconcile_delivery(
+            root, sys.argv[2], compatible=sys.argv[1] == "delivery-retire-compatible")
         print(json.dumps(report))
-        return 2 if sys.argv[1] == "delivery-reconcile" and report["status"] == "inspection-required" else 0
+        return 2 if sys.argv[1] != "delivery-status" and report["status"] == "inspection-required" else 0
     try:
         code, detail = send(os.environ.get("HIVE_ROOT", "/srv/hive"), sys.argv[1], sys.argv[2], require_idle=os.environ.get("HIVE_DELIVERY_REQUIRE_IDLE") == "1")
     except (OSError, subprocess.CalledProcessError, ValueError) as error:

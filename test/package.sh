@@ -26,5 +26,7 @@ hook=$(HIVE_MEMBER=alice "$bin/hive-hook" claude SessionStart <<<'{"cwd":"/tmp"}
 [[ $hook == *'cedar'* && $hook == *'poke'* ]]
 snapshot=$("$bin/hive-web" --dump)
 [[ $snapshot == *'"name": "cedar"'* && $snapshot == *'"team": "poke"'* ]]
+inspection=$("$bin/hive" inspect cedar --no-web --json)
+[[ $inspection == *'"read_only": true'* && $inspection == *'"member": "alice"'* ]]
 printf 'packaged commands work with an empty host PATH\n'
 EOF

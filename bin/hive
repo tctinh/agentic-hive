@@ -33,6 +33,7 @@ usage:
   hive messages channels | pending | flush <member>
   hive room [--last N] [--since-last] [--since G]
   hive observe
+  hive inspect [member] [--all] [--json] [--no-web]
   hive claim <resource> [resource...]
   hive release <resource> [resource...]
   hive claims
@@ -623,6 +624,7 @@ main() {
   (($#)) && shift
   case $cmd in
     preflight) python3 "${MEMBER_HELPER%/*}/hive_runtime.py" preflight "$HIVE_ROOT" ;;
+    inspect) python3 "${MEMBER_HELPER%/*}/hive_inspect.py" "$@" ;;
     init) cmd_init "$@" ;;
     join) cmd_join "$@" ;;
     say) cmd_say "$@" ;;

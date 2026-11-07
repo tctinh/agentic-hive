@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -46,7 +47,7 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.addCleanup(env.stop)
         web.run_hive("hive", "init")
 
-    def request(self, path, payload, origin="http://hive.local", cookie=None):
+    def request(self, path, payload, origin="http://hive.local", cookie=None, drain=True):
         handler = object.__new__(web.Handler)
         body = json.dumps(payload).encode()
         handler.path = path
@@ -57,6 +58,14 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         responses = []
         handler._send = lambda status, data, _, *headers: responses.append((status, json.loads(data)))
         handler.do_POST()
+        # Existing routing assertions inspect the eventual report separately
+        # from the HTTP acceptance contract (covered explicitly below).
+        if drain and path == "/api/room" and responses[0][0] == 200:
+            with patch.dict(os.environ, {"HIVE_ROOT": str(self.root)}):
+                web.hive_messages.dispatch_outbox(self.root)
+            job = web.hive_messages.load(self.root / "dispatch-outbox" / f"{responses[0][1]['id']}.json")
+            if job.get("report"):
+                return responses[0][0], job["report"]
         return responses[0]
 
     def get_json(self, path, cookie=None):
@@ -67,6 +76,135 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         responses = []
         handler.do_GET()
         return responses[0]
+
+    def test_room_acceptance_never_waits_for_dispatch_and_retry_is_idempotent(self):
+        payload = {"message": "@all slow delivery", "client_id": "retry-1"}
+        with patch.object(web.hive_messages, "dispatch", side_effect=AssertionError("must not dispatch in HTTP")):
+            status, report = self.request("/api/room", payload, drain=False)
+            self.assertEqual(status, 200)
+            self.assertTrue(report["dispatch_pending"])
+            self.assertEqual(report["sent"], [])
+            self.assertEqual(report["queued"], ["alice", "bob"])
+            self.assertFalse((self.root / "sent-targets").exists())
+            self.assertEqual(self.request("/api/room", payload, drain=False)[1]["id"], report["id"])
+            self.assertEqual(self.request("/api/room", {**payload, "message": "changed"}, drain=False)[0], 400)
+            self.assertEqual(len(web.hive_messages.records(self.root)), 1)
+        with patch.dict(os.environ, {"HIVE_ROOT": str(self.root)}):
+            web.hive_messages.dispatch_outbox(self.root)
+            web.hive_messages.dispatch_outbox(self.root)
+        self.assertEqual((self.root / "sent-targets").read_text().splitlines(), ["alice", "bob"])
+        report = self.request("/api/room", payload, drain=False)[1]
+        self.assertEqual(report["sent"], ["alice", "bob"])
+
+    def test_outbox_workers_are_serialized_across_overlapping_passes(self):
+        self.request("/api/room", {"message": "@alice concurrent"}, drain=False)
+        entered, release = threading.Event(), threading.Event()
+        def slow(root, row):
+            entered.set()
+            release.wait(5)
+            return {"ok": True, "sent": [], "queued": ["alice"]}
+        with patch.object(web.hive_messages, "dispatch", side_effect=slow) as dispatch:
+            worker = threading.Thread(target=web.hive_messages.dispatch_outbox, args=(self.root,))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                web.hive_messages.dispatch_outbox(self.root)
+                self.assertEqual(dispatch.call_count, 1)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+
+    def test_restart_after_delivery_before_job_completion_does_not_resend(self):
+        self.request("/api/room", {"message": "@all restart"}, drain=False)
+        atomic = web.hive_messages.atomic
+        def interrupted(path, value):
+            if value.get("status") == "attempted":
+                raise OSError("simulated interruption")
+            return atomic(path, value)
+        with patch.dict(os.environ, {"HIVE_ROOT": str(self.root)}):
+            with patch.object(web.hive_messages, "atomic", side_effect=interrupted):
+                web.hive_messages.dispatch_outbox(self.root)
+            with patch.object(web.hive_messages.time, "time_ns", return_value=time.time_ns() + 6 * 10**9):
+                web.hive_messages.dispatch_outbox(self.root)
+        self.assertEqual((self.root / "sent-targets").read_text().splitlines(), ["alice", "bob"])
+
+    def test_restart_keeps_ambiguous_attempt_latched_and_reaches_remaining_member(self):
+        self.request("/api/room", {"message": "@all interrupted"}, drain=False)
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt()
+        with patch.dict(os.environ, {"HIVE_ROOT": str(self.root)}):
+            with patch.object(web.hive_messages.subprocess, "run", side_effect=interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    web.hive_messages.dispatch_outbox(self.root)
+            with patch.object(web.hive_messages.time, "time_ns", return_value=time.time_ns() + 6 * 10**9):
+                web.hive_messages.dispatch_outbox(self.root)
+        self.assertEqual((self.root / "sent-targets").read_text().splitlines(), ["bob"])
+        pending = web.hive_messages.load(self.root / "members/alice/state/pending-wake.json")
+        self.assertTrue(pending["attempted"])
+
+    def test_room_only_cannot_be_upgraded_to_deferred_delivery(self):
+        with self.assertRaises(RuntimeError):
+            web.run_hive("hive", "say", "--room-only", "--defer-dispatch", "@alice passive")
+        self.assertEqual(web.hive_messages.records(self.root), [])
+        row = web.hive_messages.post(self.root, "beekeeper", "passive", message_id="existing")
+        with self.assertRaisesRegex(ValueError, "refusing to upgrade"):
+            web.hive_messages.post(self.root, "beekeeper", "passive", message_id="existing", defer_dispatch=True)
+        self.assertFalse((self.root / "dispatch-outbox/existing.json").exists())
+
+    def test_bad_outbox_jobs_do_not_starve_later_work(self):
+        _, first = self.request("/api/room", {"message": "@alice first"}, drain=False)
+        _, second = self.request("/api/room", {"message": "@bob second"}, drain=False)
+        (self.root / "dispatch-outbox/broken.json").write_text("{")
+        def deliver(root, row):
+            if row["id"] == first["id"]:
+                raise OSError("isolated job failure")
+            return {"ok": True}
+        with patch.object(web.hive_messages, "dispatch", side_effect=deliver) as dispatch:
+            web.hive_messages.dispatch_outbox(self.root)
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(web.hive_messages.load(self.root / "dispatch-outbox" / f"{first['id']}.json")["status"], "pending")
+        self.assertEqual(web.hive_messages.load(self.root / "dispatch-outbox" / f"{second['id']}.json")["status"], "attempted")
+
+    def test_outbox_fairness_and_backoff_after_sixteen_failing_jobs(self):
+        messages = web.hive_messages
+        bad = [messages.post(self.root, "beekeeper", f"bad {n}", defer_dispatch=True) for n in range(16)]
+        good = messages.post(self.root, "beekeeper", "good", defer_dispatch=True)
+        now = time.time_ns()
+        def deliver(root, row):
+            if row["id"] != good["id"]:
+                raise OSError("persistent dispatch failure")
+            return {"ok": True}
+        with patch.object(messages.time, "time_ns", return_value=now), patch.object(messages, "dispatch", side_effect=deliver) as dispatch:
+            messages.dispatch_outbox(self.root)
+            self.assertEqual(dispatch.call_count, 16)
+            messages.dispatch_outbox(self.root)
+            self.assertEqual(dispatch.call_count, 17)
+            self.assertEqual(dispatch.call_args.args[1]["id"], good["id"])
+            messages.dispatch_outbox(self.root)
+            self.assertEqual(dispatch.call_count, 17)  # failed jobs are backed off
+        for row in bad:
+            job = messages.load(self.root / "dispatch-outbox" / f"{row['id']}.json")
+            self.assertEqual(job["status"], "pending")
+            self.assertGreater(job["next_attempt_ns"], now)
+        newer = messages.post(self.root, "beekeeper", "newer", defer_dispatch=True)
+        with patch.object(messages.time, "time_ns", return_value=now + 6 * 10**9), patch.object(messages, "dispatch", side_effect=deliver) as dispatch:
+            messages.dispatch_outbox(self.root)
+            self.assertEqual(dispatch.call_args_list[0].args[1]["id"], newer["id"])
+            self.assertEqual(dispatch.call_count, 16)
+            self.assertTrue(all(not call.kwargs.get("retry") for call in dispatch.call_args_list))
+
+    def test_sixteen_mismatched_intents_do_not_consume_dispatch_budget(self):
+        messages = web.hive_messages
+        for n in range(16):
+            row = messages.post(self.root, "beekeeper", f"mismatch {n}", defer_dispatch=True)
+            path = self.root / "dispatch-outbox" / f"{row['id']}.json"
+            messages.atomic(path, {**messages.load(path), "fingerprint": "mismatched"})
+        good = messages.post(self.root, "beekeeper", "good", defer_dispatch=True)
+        with patch.object(messages, "dispatch", return_value={"ok": True}) as dispatch:
+            messages.dispatch_outbox(self.root)
+            dispatch.assert_called_once()
+            self.assertEqual(dispatch.call_args.args[1]["id"], good["id"])
 
     def test_room_all_posts_once_and_sends_to_every_agent(self):
         status, data = self.request("/api/room", {"message": "@all please check status"})

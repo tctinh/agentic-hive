@@ -1209,7 +1209,9 @@ function cancelReply() {
   $("room-message").maxLength = 12000;
 }
 
+let roomSubmission = null;
 async function sendRoomMessage() {
+  if ($("room-send").disabled) return;
   const field = $("room-message"), button = $("room-send"), feedback = $("room-feedback");
   const draft = field.value.trim();
   const message = replyTo ? `> Reply to ${replyTo.member} · Room #${replyTo.gen}: ${replyTo.excerpt}\n\n${draft}` : draft;
@@ -1230,9 +1232,15 @@ async function sendRoomMessage() {
       payload.resolution = "ack";
       payload.reply_to = replyTo.requestId;
     }
+    const fingerprint = JSON.stringify(payload);
+    if (!roomSubmission || roomSubmission.fingerprint !== fingerprint) {
+      roomSubmission = {fingerprint, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("")};
+    }
+    payload.client_id = roomSubmission.id;
     const res = await fetch("/api/room", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    roomSubmission = null;
     field.value = "";
     hideMentionOptions();
     cancelReply();
@@ -1241,6 +1249,7 @@ async function sendRoomMessage() {
     const unconfirmed = Object.keys(data.unconfirmed || {});
     feedback.classList.toggle("error", failures.length > 0);
     feedback.textContent = `Posted to ${payload.channel}${data.sent.length ? ` and submitted to ${data.sent.map(memberName).join(", ")}` : ""}.`;
+    if (data.dispatch_pending && data.queued?.length) feedback.textContent += ` Delivery queued for ${data.queued.map(memberName).join(", ")}; not yet confirmed.`;
     if (unconfirmed.length) feedback.textContent += ` Submission unconfirmed: ${unconfirmed.map(memberName).join(", ")}. Check the member terminal before resending.`;
     if (failures.length) feedback.textContent += ` Delivery failed: ${failures.map(([name, reason]) => `${memberName(name)} (${reason})`).join(", ")}`;
     try {
@@ -1251,7 +1260,7 @@ async function sendRoomMessage() {
     }
   } catch (err) {
     feedback.classList.add("error");
-    feedback.textContent = `Could not post: ${err.message}`;
+    feedback.textContent = `Posting not confirmed: ${err.message}. Retry this unchanged draft safely; it may already be recorded.`;
   } finally { button.disabled = false; }
 }
 

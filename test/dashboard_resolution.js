@@ -9,15 +9,20 @@ const $ = id => {
   return elements.get(id);
 };
 const lookups=[], posts=[];
+let failPost = false, holdPost = null;
 const fixtures = [{id:'first',gen:1,member:'alice',body:'First?',channel:'choice'},
                   {id:'second',gen:2,member:'bob',body:'Second?',channel:'combat'}];
-const context=vm.createContext({$, encodeURIComponent, replyTo:null, currentChannel:'choice',
+const context=vm.createContext({crypto: require("node:crypto").webcrypto,$, encodeURIComponent, replyTo:null, currentChannel:'choice',
   channelEntries:fixtures, dashboardData:{room:[],beekeeper_mentions:[]},
   showTab(){}, memberName:v=>v, myBeekeeper:()=> 'beekeeper', esc:v=>String(v),
   mentionedNames:()=>new Set(['alice','bob']), insertMention(){}, hideMentionOptions(){},updateRecipients(){},render(){},
   fetch:(url,options)=> {
     if(url.startsWith('/api/messages')) return new Promise(resolve=>lookups.push({url,resolve}));
-    if(url==='/api/room') posts.push(JSON.parse(options.body));
+    if(url==='/api/room') {
+      posts.push(JSON.parse(options.body));
+      if (failPost) return Promise.reject(new Error('connection lost'));
+      if (holdPost) return new Promise(resolve => { holdPost.resolve = resolve; });
+    }
     return Promise.resolve({ok:true,json:async()=>({ok:true,sent:[],failed:{},unconfirmed:{}})});
   }});
 const start=html.indexOf('function startReply('), end=html.indexOf('\ndocument.addEventListener("click"',start);
@@ -50,5 +55,22 @@ const respond=(lookup,id)=>lookup.resolve({ok:true,json:async()=>({id,kind:'requ
   vm.runInContext('startReply(1); cancelReply()',context);
   respond(lookups[3],'first'); await settle();
   assert.equal($('reply-resolution').hidden,true);
+  $('room-message').value='Retry this unchanged draft';
+  failPost = true;
+  await vm.runInContext('sendRoomMessage()',context);
+  const retryID = posts.at(-1).client_id;
+  assert.match($('room-feedback').textContent, /may already be recorded/);
+  await vm.runInContext('sendRoomMessage()',context);
+  assert.equal(posts.at(-1).client_id, retryID);
+  failPost = false;
+  holdPost = {};
+  const pending = vm.runInContext('sendRoomMessage()',context);
+  const count = posts.length;
+  await vm.runInContext('sendRoomMessage()',context);
+  assert.equal(posts.length, count);
+  holdPost.resolve({ok:true,json:async()=>({ok:true,sent:[],queued:['alice'],dispatch_pending:true})});
+  await pending;
+  assert.match($('room-feedback').textContent, /queued.*not yet confirmed/);
+  assert.equal(posts.at(-1).client_id, retryID);
   console.log('Ordinary replies stay open; explicit resolution binds the request; stale lookups cannot enable resolution.');
 })().catch(err=>{console.error(err);process.exitCode=1;});

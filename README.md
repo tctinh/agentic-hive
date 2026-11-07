@@ -531,6 +531,17 @@ the dashboard's network exposure before using Hive on sensitive projects.
 | [install/hive-install](install/hive-install) | Portable systemd installer for user, habitat, services and hooks. |
 | [docs](docs) | Design notes, requirements, tasks, and incidents. |
 
+### Dashboard Room delivery
+
+Dashboard Room posts acknowledge the durable message record promptly. Recipient
+submission runs in one background worker; “queued” is not a delivery receipt.
+Pending dispatch intents survive a web-service restart. Recovery uses the same
+receipt and prompt-journal guards as normal dispatch and never forces an uncertain
+submission. Busy, failed, or ambiguous recipients remain in their existing pending
+wake state for guarded delivery/reconciliation. Normal CLI posts still dispatch
+synchronously. Retrying an unchanged draft in the same page reuses its message ID,
+including when the HTTP response was lost; reloading the page loses that retry ID.
+
 ## Test
 
 The Nix package build also checks its commands with an empty host PATH so host

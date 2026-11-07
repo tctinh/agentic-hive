@@ -650,6 +650,11 @@ def default_channel(root, sender):
     )
 
 
+def dispatch_fingerprint(row):
+    logical = {key: value for key, value in row.items() if key not in ("sequence", "created_at")}
+    return hashlib.sha256(json.dumps(logical, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def post(
     root,
     sender,
@@ -664,6 +669,7 @@ def post(
     reply_to=None,
     related_message_id=None,
     resolution=None,
+    defer_dispatch=False,
 ):
     if not hive_members.HANDLE.fullmatch(sender) or not nest(root, sender).parent.is_dir():
         raise ValueError("known sender required")
@@ -721,6 +727,9 @@ def post(
                 key not in logical for key in existing if key not in ("sequence", "created_at")
             ):
                 raise ValueError("message ID already used for different content")
+            intent = load(Path(root) / "dispatch-outbox" / f"{message_id}.json") if defer_dispatch else {}
+            if defer_dispatch and intent.get("fingerprint") != dispatch_fingerprint(existing):
+                raise ValueError("message already exists without deferred delivery; refusing to upgrade its delivery intent")
             project(root, rows)  # repair a prior interrupted compatibility projection
             return existing
         if channel != "dm":
@@ -746,6 +755,11 @@ def post(
             "sequence": (rows[-1]["sequence"] if rows else 0) + 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Persist intent first: a crash before append leaves an inert orphan;
+        # a crash after append leaves a discoverable job, never a lost wake.
+        if defer_dispatch:
+            atomic(Path(root) / "dispatch-outbox" / f"{message_id}.json",
+                   {"id": message_id, "status": "pending", "fingerprint": dispatch_fingerprint(row)})
         with (Path(root) / "messages.jsonl").open("a") as stream:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             stream.flush()
@@ -1259,6 +1273,66 @@ def drain(root, member):
     return dispatch(root, row, retry=True) if row else {"queued": []}
 
 
+def dispatch_outbox(root):
+    """One bounded worker pass. Completion means attempted, not delivered.
+
+    Hold a cross-process job lock through dispatch. Restart uses normal guards,
+    never retry=True: receipts suppress duplicates and ambiguous journals latch.
+    Failed/busy recipients remain in their existing durable pending-wake state.
+    """
+    directory = Path(root) / "dispatch-outbox"
+    jobs = []
+    for path in directory.glob("*.json"):
+        try:
+            job = json.loads(path.read_text())
+            if not isinstance(job, dict) or job.get("status") not in ("pending", "attempted") or not isinstance(job.get("id"), str):
+                raise ValueError("invalid dispatch intent")
+            if any(not isinstance(job.get(key, 0), int) or job.get(key, 0) < 0
+                   for key in ("last_attempt_ns", "next_attempt_ns", "attempts")):
+                raise ValueError("invalid dispatch schedule")
+            if job["status"] == "pending":
+                jobs.append((path, job))
+        except (OSError, ValueError) as error:
+            print(f"hive: dispatch intent {path.name} retained: {error}", file=sys.stderr)
+    if not jobs:
+        return
+    rows = {row["id"]: row for row in records(root)}
+    jobs = [(path, job) for path, job in jobs if job.get("id") in rows]
+    attempts = 0
+    # Least recently attempted first: an old failing job cannot monopolize the
+    # bounded worker after its backoff expires. Invalid intents spend no slots.
+    jobs.sort(key=lambda item: (item[1].get("last_attempt_ns", 0), rows[item[1]["id"]]["sequence"]))
+    for path, job in jobs:
+        if attempts >= 16:
+            break
+        try:
+            with locked(path.with_suffix(".lock"), wait=0):
+                job = load(path)
+                if job.get("status") != "pending":
+                    continue
+                if job.get("fingerprint") != dispatch_fingerprint(rows[job["id"]]):
+                    raise ValueError("dispatch intent does not match canonical message")
+                now = time.time_ns()
+                if job.get("next_attempt_ns", 0) > now:
+                    continue
+                failures = min(job.get("attempts", 0), 6)
+                job = {**job, "last_attempt_ns": now, "attempts": failures + 1,
+                       "next_attempt_ns": now + min(5 * 2**failures, 300) * 10**9}
+                # Persist scheduling before transport. If this write fails, no
+                # dispatch occurs and the broken file consumes no attempt slot.
+                atomic(path, job)
+                attempts += 1
+                try:
+                    report = dispatch(root, rows[job["id"]])
+                    atomic(path, {**job, "status": "attempted", "report": report})
+                except Exception as error:
+                    print(f"hive: dispatch {job['id']} retained pending with backoff: {error}", file=sys.stderr)
+        except TimeoutError:
+            continue
+        except Exception as error:
+            print(f"hive: dispatch {job['id']} retained pending: {error}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1292,6 +1366,7 @@ def main():
     parser.add_argument("--reply-to")
     parser.add_argument("--related-message-id")
     parser.add_argument("--room-only", action="store_true")
+    parser.add_argument("--defer-dispatch", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--since", type=int, default=0)
     parser.add_argument("--before", type=int)
@@ -1302,6 +1377,8 @@ def main():
     parser.add_argument("--pin")
     parser.add_argument("--resolution", choices=("ack", "cancel"))
     args = parser.parse_args()
+    if args.room_only and args.defer_dispatch:
+        parser.error("--room-only cannot be combined with --defer-dispatch")
     root = Path(os.environ.get("HIVE_ROOT", "/srv/hive"))
     member = os.environ.get("HIVE_MEMBER", "")
     if args.command == "route":
@@ -1338,20 +1415,26 @@ def main():
             reply_to=args.reply_to,
             related_message_id=args.related_message_id,
             resolution=args.resolution,
+            defer_dispatch=args.defer_dispatch,
         )
         report = (
             dispatch(root, row)
-            if not args.room_only
+            if not args.room_only and not args.defer_dispatch
             else {
                 "ok": True,
                 "id": row["id"],
                 "generation": row["sequence"],
                 "sent": [],
-                "queued": [],
+                "queued": [m for m in row.get("recipients", []) if not human(root, m)] if args.defer_dispatch else [],
+                "dispatch_pending": args.defer_dispatch,
                 "failed": {},
                 "unconfirmed": {},
             }
         )
+        if args.defer_dispatch:
+            job = load(root / "dispatch-outbox" / f"{row['id']}.json")
+            if job.get("status") == "attempted":
+                report = job["report"]
         if args.json:
             print(json.dumps(report))
         else:

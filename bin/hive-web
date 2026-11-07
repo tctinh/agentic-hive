@@ -987,7 +987,13 @@ class Handler(BaseHTTPRequestHandler):
                     channel = req.get("channel", "hive")
                     if not isinstance(channel, str) or not hive_messages.CHANNEL.fullmatch(channel):
                         raise ValueError("valid channel required")
-                    options = ["--json", "--channel", channel]
+                    options = ["--json", "--defer-dispatch", "--channel", channel]
+                    client_id = req.get("client_id")
+                    if client_id is not None:
+                        if not isinstance(client_id, str) or not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", client_id):
+                            raise ValueError("invalid client message ID")
+                        digest = hashlib.sha256(f"{actor_member}:{client_id}".encode()).hexdigest()
+                        options += ["--id", "dashboard-" + digest]
                     kind = req.get("kind")
                     if kind is not None:
                         if kind not in ("info", "request", "decision"):
@@ -1005,7 +1011,7 @@ class Handler(BaseHTTPRequestHandler):
                         digest = hashlib.sha256(json.dumps([actor_member, request_id, body]).encode()).hexdigest()
                         options += ["--resolution", "ack", "--reply-to", request_id,
                                     "--to", request["sender"], "--id", "dashboard-resolution-" + digest]
-                    report = json.loads(run_hive("hive", "say", *options, "-", input_text=body, member=actor_member, timeout=300))
+                    report = json.loads(run_hive("hive", "say", *options, "-", input_text=body, member=actor_member))
                     self._send(200, json.dumps(report), "application/json")
                     return
                 member = req.get("member", "")
@@ -1020,6 +1026,10 @@ class Handler(BaseHTTPRequestHandler):
                 run_hive("hive-member", "send", member, named_prompt)
 
                 self._send(200, json.dumps({"ok": True}), "application/json")
+            except (BrokenPipeError, ConnectionResetError):
+                # Posting may already be durable. A disconnected browser must
+                # not turn acceptance into a second error response or resend.
+                return
             except Exception as e:
                 self._send(400, json.dumps({"ok": False, "error": str(e)}), "application/json")
             return
@@ -1085,6 +1095,16 @@ class Handler(BaseHTTPRequestHandler):
         pass  # polled every few seconds; keep the journal quiet
 
 
+def room_dispatch_worker(stop):
+    """One background dispatcher, independent of HTTP client lifetime."""
+    while not stop.is_set():
+        try:
+            hive_messages.dispatch_outbox(HIVE_ROOT)
+        except Exception as error:
+            print(f"hive-web: Room dispatch retained pending: {error}", file=sys.stderr, flush=True)
+        stop.wait(1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--address", default=os.environ.get("HIVE_WEB_ADDRESS", "0.0.0.0"))
@@ -1097,7 +1117,13 @@ def main():
         return
     srv = ThreadingHTTPServer((a.address, a.port), Handler)
     print(f"hive-web: serving {HIVE_ROOT} on http://{a.address}:{a.port}/", flush=True)
-    srv.serve_forever()
+    stop = threading.Event()
+    threading.Thread(target=room_dispatch_worker, args=(stop,), daemon=True).start()
+    try:
+        srv.serve_forever()
+    finally:
+        stop.set()
+        srv.server_close()
 
 
 if __name__ == "__main__":

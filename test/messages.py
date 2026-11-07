@@ -46,6 +46,49 @@ class MessageTests(unittest.TestCase):
         hive_members.update(self.root, "bob", project="debter", team="titantwoshot")
         hive_members.update(self.root, "carol", project="other", team="poke")
 
+    def test_outbox_intent_before_append_is_inert_after_interruption(self):
+        atomic = messages.atomic
+        def interrupt(path, value):
+            atomic(path, value)
+            if value.get("status") == "pending":
+                raise OSError("interrupted before canonical append")
+        with patch.object(messages, "atomic", side_effect=interrupt):
+            with self.assertRaises(OSError):
+                self.post("durable", recipients=["bob"], kind="request",
+                          message_id="before-append", defer_dispatch=True)
+        with patch.object(messages, "dispatch") as dispatch:
+            messages.dispatch_outbox(self.root)
+            dispatch.assert_not_called()
+        self.assertEqual(messages.records(self.root), [])
+        self.post("durable", recipients=["bob"], kind="request",
+                  message_id="before-append", defer_dispatch=True)
+        self.assertEqual(len(messages.records(self.root)), 1)
+
+    def test_orphan_intent_cannot_upgrade_a_different_passive_record(self):
+        row = self.post("passive", message_id="reused")
+        atomic(self.root / "dispatch-outbox/reused.json",
+               {"id": "reused", "status": "pending", "fingerprint": "unrelated intent"})
+        with patch.object(messages, "dispatch") as dispatch:
+            messages.dispatch_outbox(self.root)
+            dispatch.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "refusing to upgrade"):
+            self.post("passive", message_id="reused", defer_dispatch=True)
+
+    def test_outbox_survives_interrupted_projection_without_reposting(self):
+        with patch.object(messages, "project", side_effect=OSError("projection interrupted")):
+            with self.assertRaises(OSError):
+                self.post("durable", recipients=["bob"], kind="request",
+                          message_id="after-append", defer_dispatch=True)
+        self.post("durable", recipients=["bob"], kind="request",
+                  message_id="after-append", defer_dispatch=True)
+        self.assertEqual(len(messages.records(self.root)), 1)
+        with patch.object(messages, "dispatch", return_value={"ok": True}) as dispatch:
+            messages.dispatch_outbox(self.root)
+            messages.dispatch_outbox(self.root)
+            dispatch.assert_called_once()
+            self.assertEqual(dispatch.call_args.args[1]["id"], "after-append")
+            self.assertNotIn("retry", dispatch.call_args.kwargs)
+
     def test_explicit_team_filter_and_project_interface_subscription(self):
         self.setup_team()
         row = self.post("team only")

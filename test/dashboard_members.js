@@ -35,7 +35,19 @@ assert(card.includes('data-action="wake"'));
 assert(!card.includes('data-action="restart"'));
 assert(!card.includes('data-terminal="astra-master"'));
 
+renderMembers([{member: 'astra-master', state: 'unknown', running: null}]);
+card = $('members').innerHTML;
+assert(card.includes('Session status unavailable'));
+for (const action of ['wake', 'restart', 'kill', 'delete']) {
+  assert(!card.includes(`data-action="${action}"`));
+}
+assert(!card.includes('data-terminal="astra-master"'));
+assert(card.includes('data-edit-member="astra-master"'));
+
+renderMembers([{member: 'astra-master', state: 'dead'}]);
+assert($('members').innerHTML.includes('data-action="wake"'));
+
 currentMemberTab = 'idle';
 renderMembers([{member: 'astra-master', state: 'idle'}]);
 assert($('members').innerHTML.includes('data-terminal="astra-master"'));
-console.log('Running unknown, stopped, and older-server member controls pass.');
+console.log('Running unknown, unavailable, stopped, and older-server member controls pass.');

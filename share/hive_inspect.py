@@ -28,24 +28,68 @@ def web_snapshot(url):
         return {}, {"url": url, "ok": False, "error": str(error)}
 
 
+def object_state(path):
+    value = load(path)
+    if not isinstance(value, dict):
+        raise ValueError(path.name + " must contain a JSON object")
+    return value
+
+
+def identity_list(record, field):
+    value = record.get(field, [])
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(field + " must contain a list of IDs")
+    return value
+
+
+def delivery_records(path):
+    journal = object_state(path / "prompt-delivery.json")
+    if not journal:
+        marker = object_state(path / "last-retired-prompt-delivery.json")
+        retirement = marker.get("retirement", {})
+        if not isinstance(retirement, dict):
+            raise ValueError("retirement must contain an object")
+        if marker.get("stage") == "retired" and retirement.get("mode") == "legacy-empty-active":
+            journal = marker
+    return journal, object_state(path / "pending-wake.json")
+
+
+def unreadable_delivery():
+    return {"review_reason": "delivery state unreadable", "journal_stage": None,
+        "journal_ids": [], "queued_count": None, "uncertain_attempt": True,
+        "no_input": False, "compatible_retired": False}
+
+
 def delivery_summary(journal, pending):
+    ids = identity_list(journal, "ids")
+    queued = identity_list(pending, "ids")
     stage = journal.get("stage")
-    if stage not in (None, "acknowledged", "retired"):
-        reason = "missing journal session identity" if not journal.get("session_id") else (
-            "legacy direct attempt without IDs" if not journal.get("ids") else "earlier submission is unconfirmed")
-    else:
+    version = journal.get("version", 1)
+    retirement = journal.get("retirement", {})
+    if (type(version) is not int or version < 1 or not isinstance(retirement, dict)
+        or stage not in (None, "queued", "pasted", "submitted", "accepted", "acknowledged", "retired")
+        or type(pending.get("attempted", False)) is not bool):
+        raise ValueError("invalid journal version, stage, retirement or attempt flag")
+    no_input = stage == "queued"
+    if no_input or stage in (None, "acknowledged", "retired"):
         reason = None
-    return {"journal_stage": stage, "journal_ids": journal.get("ids", []),
-        "review_reason": reason, "queued_count": len(pending.get("ids", [])),
-        "uncertain_attempt": bool(pending.get("attempted"))}
+    elif not journal.get("session_id"):
+        reason = "missing journal session identity"
+    elif not ids:
+        reason = "direct submission is unconfirmed" if version >= 2 else "legacy direct attempt without IDs"
+    else:
+        reason = "earlier submission is unconfirmed"
+    return {"journal_stage": stage, "journal_ids": ids,
+        "review_reason": reason, "queued_count": len(queued),
+        "uncertain_attempt": bool(pending.get("attempted")), "no_input": no_input,
+        "compatible_retired": stage == "retired" and retirement.get("mode") == "legacy-empty-active"}
 
 
 def member_delivery(path):
     try:
-        return delivery_summary(load(path / "prompt-delivery.json"), load(path / "pending-wake.json"))
+        return delivery_summary(*delivery_records(path))
     except (OSError, ValueError, TypeError, AttributeError):
-        return {"review_reason": "delivery state unreadable", "journal_stage": None,
-            "journal_ids": [], "queued_count": None, "uncertain_attempt": True}
+        return unreadable_delivery()
 
 
 def snapshot(root, *, member=None, include_all=False, limit=3, web=None, health=None):
@@ -69,25 +113,25 @@ def snapshot(root, *, member=None, include_all=False, limit=3, web=None, health=
             continue
         path = root / "members" / name / "state"
         try:
-            telemetry = load(root / "telemetry/members" / (name + ".json"))
-            journal = load(path / "prompt-delivery.json")
-            pending = load(path / "pending-wake.json")
-            ledger = load(path / "delivery.json")
-            proof = load(path / "journal-prompt-receipt.json")
-            if not all(isinstance(value, dict) for value in (telemetry, journal, pending, ledger)):
-                raise ValueError("member state must contain JSON objects")
-        except (OSError, ValueError) as error:
+            telemetry = object_state(root / "telemetry/members" / (name + ".json"))
+            journal, pending = delivery_records(path)
+            ledger = object_state(path / "delivery.json")
+            proof = object_state(path / "journal-prompt-receipt.json")
+            identity_list(ledger, "request_receipts")
+            delivery = delivery_summary(journal, pending)
+            submission_proven = bool(journal and (hive_prompt.proof_acknowledges(journal, proof, journal.get("session_id"))
+                or hive_prompt.current_receipt_acknowledges(journal, path, journal.get("session_id"))))
+        except (OSError, ValueError, TypeError, AttributeError) as error:
             errors.append(name + ": " + str(error))
             telemetry, journal, pending, ledger, proof = {}, {}, {}, {}, {}
+            delivery = unreadable_delivery()
+            submission_proven = False
         current = live.get(name, {})
         running = current.get("running")
         state = lifecycle_state(telemetry, current.get("pid")) if running is True else (
             current.get("state", "unknown") if running is False else "unknown")
         binding = "current-process" if running and telemetry.get("pid") == current.get("pid") else (
             "previous-process" if running else "unavailable")
-        delivery = delivery_summary(journal, pending)
-        submission_proven = bool(journal and (hive_prompt.proof_acknowledges(journal, proof, journal.get("session_id"))
-            or hive_prompt.current_receipt_acknowledges(journal, path, journal.get("session_id"))))
         delivery["submission_proven"] = submission_proven
         ids = journal.get("ids", [])
         delivery["closed_request_retirement_candidate"] = bool(journal.get("stage") not in (None, "acknowledged", "retired")
@@ -114,7 +158,7 @@ def snapshot(root, *, member=None, include_all=False, limit=3, web=None, health=
                 "reply_to": last.get("reply_to"), "text": last["body"][:320]} if last else None}
         if include_all or member or running is True:
             result.append(item)
-        elif delivery["queued_count"] or delivery["review_reason"]:
+        elif delivery["queued_count"] or delivery["review_reason"] or delivery["no_input"]:
             offline.append({"member": name, "queued_count": delivery["queued_count"],
                 "review_reason": delivery["review_reason"], "running": running})
     return {"at_utc": datetime.now(timezone.utc).isoformat(), "read_only": True,
@@ -136,6 +180,10 @@ def render(report):
         lines.append("  Last hook: " + str(item["last_hook_activity"]) + " · " + str(item["last_hook_event"]))
         delivery = item["delivery"]
         lines.append("  Queue: " + str(delivery["queued_count"]) + " · journal: " + str(delivery["journal_stage"]))
+        if delivery["no_input"]:
+            lines.append("  Journal queued; no input was pasted by this attempt.")
+        if delivery["compatible_retired"]:
+            lines.append("  Closed requests retired for compatibility; active journal empty; submission remains unproven.")
         if delivery["review_reason"]:
             lines.append("  Delivery review: " + delivery["review_reason"])
         if delivery["closed_request_retirement_candidate"]:

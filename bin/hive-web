@@ -390,16 +390,19 @@ def alive(pid, harness):
 def member_panes():
     """Map each member session to its pane PID; telemetry may retain an old PID."""
     try:
-        result = subprocess.run(tmux_cmd("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"),
+        result = subprocess.run(tmux_cmd("list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}"),
                                 capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
     if result.returncode:
-        return {}
+        return None
     panes = {}
     for line in result.stdout.splitlines():
-        session, sep, pid = line.partition("\t")
-        if sep and pid.isdigit() and session.startswith("hive-"):
+        fields = line.split("\t")
+        if len(fields) != 4:
+            return None
+        session, window, pane, pid = fields
+        if window == "0" and pane == "0" and pid.isdigit() and session.startswith("hive-"):
             panes[session[5:]] = int(pid)
     return panes
 
@@ -442,8 +445,10 @@ def members(generation, now, room_entries):
         except json.JSONDecodeError:
             launch = {}
         harness = launch.get("harness") or t.get("harness") or ""
-        live_pid = pane_harness_pid(panes.get(name), harness)
-        if live_pid:
+        live_pid = pane_harness_pid(panes.get(name), harness) if panes is not None else None
+        if panes is None:
+            state = "unknown"
+        elif live_pid:
             state = lifecycle_state(t, live_pid)
         elif not t and name not in panes:
             state = "never"
@@ -459,7 +464,7 @@ def members(generation, now, room_entries):
             "team": profile["team"],
             "workdir": profile["workdir"] or launch.get("dir") or cwd or str(HIVE_ROOT / "projects"),
             "state": state,
-            "running": live_pid is not None,
+            "running": live_pid is not None if panes is not None else None,
             "telemetry_freshness": "recent" if last is not None and 0 <= now - last < WORKING_WINDOW else "unknown",
             "telemetry_binding": "current-process" if live_pid and t.get("pid") == live_pid else "previous-process" if live_pid else "unavailable",
             "delivery": hive_inspect.member_delivery(d / "state"),

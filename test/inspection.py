@@ -94,6 +94,53 @@ class Inspection(unittest.TestCase):
         self.assertTrue(report['errors'])
         self.assertEqual((self.state/'prompt-delivery.json').read_text(),'{bad')
 
+    def test_direct_and_queued_journals_are_classified_accurately(self):
+        journal = {'version': 2, 'ids': [], 'session_id': 'fixture', 'stage': 'pasted'}
+        self.assertEqual(inspect.delivery_summary(journal, {})['review_reason'], 'direct submission is unconfirmed')
+        journal['version'] = 1
+        self.assertEqual(inspect.delivery_summary(journal, {})['review_reason'], 'legacy direct attempt without IDs')
+        journal['stage'] = 'queued'
+        value = inspect.delivery_summary(journal, {})
+        self.assertTrue(value['no_input'])
+        self.assertIsNone(value['review_reason'])
+
+    def test_compatible_retirement_is_visible_without_active_journal(self):
+        marker = {'stage': 'retired', 'ids': ['old'], 'retirement': {'mode': 'legacy-empty-active'}}
+        atomic(self.state/'prompt-delivery.json', {})
+        atomic(self.state/'last-retired-prompt-delivery.json', marker)
+        before = {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        report = self.snapshot()
+        delivery = report['members'][0]['delivery']
+        self.assertEqual(delivery['journal_stage'], 'retired')
+        self.assertTrue(delivery['compatible_retired'])
+        self.assertEqual(inspect.member_delivery(self.state)['journal_stage'], 'retired')
+        self.assertIn('active journal empty', inspect.render(report))
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_malformed_member_state_is_unreadable_not_empty(self):
+        cases = [('pending-wake.json', {'ids': None}),
+                 ('pending-wake.json', {'attempted': 'false'}),
+                 ('prompt-delivery.json', {'stage': []}),
+                 ('prompt-delivery.json', {'ids': [None]}),
+                 ('delivery.json', {'request_receipts': None}),
+                 ('journal-prompt-receipt.json', []),
+                 ('prompt-delivery.json', {'version': 'two'}),
+                 ('prompt-delivery.json', '{broken')]
+        for filename, value in cases:
+            with self.subTest(filename=filename, value=value):
+                target = self.state/filename
+                if isinstance(value, str):
+                    target.write_text(value)
+                else:
+                    atomic(target, value)
+                report = self.snapshot()
+                delivery = report['members'][0]['delivery']
+                self.assertTrue(report['errors'])
+                self.assertIsNone(delivery['queued_count'])
+                self.assertEqual(delivery['review_reason'], 'delivery state unreadable')
+                self.assertTrue(delivery['uncertain_attempt'])
+                target.unlink()
+
     def test_web_fetch_uses_get_and_reports_errors(self):
         with patch('hive_inspect.urllib.request.urlopen',side_effect=urllib.error.URLError('fixture')) as fetch:
             value,health=inspect.web_snapshot('http://fixture')

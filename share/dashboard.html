@@ -740,7 +740,8 @@ function renderMembers(all) {
   $("m-count").textContent = currentTeam ? `· ${selected.length} of ${all.length}` : `· ${all.length}`;
   const ms = selected.filter(m => currentMemberTab === "inactive" ? !["working", "idle"].includes(m.state) : m.state === currentMemberTab);
   $("members").innerHTML = ms.length ? ms.map(m => {
-    const live = m.running ?? (m.state === "working" || m.state === "idle");
+    const unavailable = m.running === null;
+    const live = m.running === undefined ? (m.state === "working" || m.state === "idle") : m.running;
     const last = m.last_room;
     return `<div class="m ${esc(m.state)}" data-member-card="${esc(m.member)}">
       <div class="top"><span class="name" title="Session ${esc(m.member)}">${esc(m.name || m.member)}</span><span class="badge">${esc(live && m.state === "unknown" ? "running · activity unknown" : m.state)}</span></div>
@@ -757,10 +758,10 @@ function renderMembers(all) {
       </dl>
       <div class="last-room"><b>Last Room message</b> · ${last ? ago(last.ts) : "none yet"}<br>${last ? esc(last.body.slice(0, 220)) : "No message from this member in the Room tail."}</div>
       <div class="action-row">
-        ${live ? `<button class="icon-button" data-terminal="${esc(m.member)}" title="Open ${esc(m.member)} terminal" aria-label="Open ${esc(m.member)} terminal"><svg aria-hidden="true"><use href="#icon-terminal"/></svg></button>` : `<button data-action="wake" data-member="${esc(m.member)}" title="Wake ${esc(m.member)}">Wake</button>`}
+        ${unavailable ? '<span class="muted">Session status unavailable</span>' : live ? `<button class="icon-button" data-terminal="${esc(m.member)}" title="Open ${esc(m.member)} terminal" aria-label="Open ${esc(m.member)} terminal"><svg aria-hidden="true"><use href="#icon-terminal"/></svg></button>` : `<button data-action="wake" data-member="${esc(m.member)}" title="Wake ${esc(m.member)}">Wake</button>`}
         <button class="icon-button" data-copy="hive-attach ${esc(m.name || m.member)}" title="Copy attach command" aria-label="Copy attach command for ${esc(m.name || m.member)}"><svg aria-hidden="true"><use href="#icon-copy"/></svg></button>
         ${live ? `<button data-action="restart" data-member="${esc(m.member)}" title="Restart ${esc(m.member)}">Restart</button><button class="icon-button" data-action="kill" data-member="${esc(m.member)}" title="Kill ${esc(m.member)}" aria-label="Kill ${esc(m.member)}"><svg aria-hidden="true"><use href="#icon-stop"/></svg></button>` : ""}
-        <button class="danger" data-action="delete" data-member="${esc(m.member)}" title="Delete ${esc(m.member)}">Delete</button>
+        ${unavailable ? "" : `<button class="danger" data-action="delete" data-member="${esc(m.member)}" title="Delete ${esc(m.member)}">Delete</button>`}
         <button type="button" data-edit-member="${esc(m.member)}">Name &amp; team</button>
       </div>
     </div>`;

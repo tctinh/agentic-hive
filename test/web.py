@@ -211,6 +211,26 @@ if [[ $2 == ${HIVE_TEST_UNCONFIRMED_MEMBER:-} ]]; then echo 'submission unconfir
         self.assertEqual(status, 200)
         run.assert_called_once_with("hive-member", "delete", "alice", "--force")
 
+    def test_member_panes_selects_delivery_target_not_last_split(self):
+        result = subprocess.CompletedProcess([], 0, stdout='hive-alice\t0\t0\t100\nhive-alice\t0\t1\t200\nhive-alice\t1\t0\t300\n')
+        with patch.object(web.subprocess, 'run', return_value=result):
+            self.assertEqual(web.member_panes(), {'alice': 100})
+
+    def test_tmux_failure_is_unknown_not_dead(self):
+        for failure in (subprocess.CompletedProcess([], 1, stdout=''), subprocess.TimeoutExpired('tmux', 3)):
+            options = {'side_effect': failure} if isinstance(failure, Exception) else {'return_value': failure}
+            with self.subTest(failure=failure), patch.object(web.subprocess, 'run', **options):
+                self.assertIsNone(web.member_panes())
+            with patch.object(web, 'member_panes', return_value=None), patch.object(web, 'pane_harness_pid') as find:
+                member = next(m for m in web.members(0, 0, []) if m['member'] == 'alice')
+                self.assertEqual(member['state'], 'unknown')
+                self.assertIsNone(member['running'])
+                find.assert_not_called()
+        with patch.object(web, 'member_panes', return_value={}):
+            member = next(m for m in web.members(0, 0, []) if m['member'] == 'alice')
+            self.assertFalse(member['running'])
+            self.assertEqual(member['state'], 'never')
+
     def test_live_pane_overrides_stale_telemetry_pid(self):
         values = {"/proc/100/comm": "bash", "/proc/100/task/100/children": "101",
                   "/proc/101/comm": ".codex-wrapped", "/proc/101/task/101/children": ""}

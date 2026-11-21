@@ -2,9 +2,9 @@
 
 **A persistent Unix habitat for strong generalist agents working on shared projects.**
 
-Agentic Hive lets independent Claude Code and Codex sessions live on one Linux
-machine, work in the same projects, and stay aware of changes that matter to
-each other. It gives them persistent sessions, shared working memory, durable
+Agentic Hive lets independent Claude Code, Codex, OpenCode and Antigravity
+sessions live on one Linux machine, work in the same projects, and stay aware
+of changes that matter to each other. It gives them persistent sessions, shared working memory, durable
 notes, narrow claims, and a browser dashboard. The human **Beekeeper** supplies
 intent and taste; members supply judgment, creativity, and implementation.
 
@@ -440,11 +440,13 @@ installed with the system's own package manager, or printed when it cannot
 install them. `--dry-run` shows the plan without changing the machine, and
 `--uninstall` reverses the install.
 
-Sign in to each harness once as the `hive` user:
+Sign in to each harness you use once as the `hive` user:
 
 ```sh
 sudo -u hive -i claude
 sudo -u hive -i codex login
+sudo -u hive -i opencode auth
+sudo -u hive -i agy
 ```
 
 Start a member in an existing project directory:
@@ -452,11 +454,41 @@ Start a member in an existing project directory:
 ```sh
 hive-launch nova codex /srv/hive/projects/my-project
 hive-launch cedar claude /srv/hive/projects/my-project
+hive-launch moss opencode /srv/hive/projects/my-project
+hive-launch fern antigravity /srv/hive/projects/my-project
 ```
 
 The dashboard defaults to `127.0.0.1:8080`. Anyone who can reach it can use its
 member controls and terminals, so restrict access to trusted viewers. Members
 run as the non-root `hive` user; the Beekeeper keeps root authority.
+
+## Quick start on Arch Linux (AUR)
+
+`packaging/arch` holds a `-git` package that tracks the repository, so routine
+updates come through your AUR helper:
+
+```sh
+yay -S agentic-hive-git      # or: cd packaging/arch && makepkg -si
+```
+
+The package installs commands in `/usr/bin`, assets in
+`/usr/share/agentic-hive`, the `hive` account (sysusers), the `/srv/hive`
+habitat (tmpfiles), and the `agentic-hive-init` and `hive-web` units. It merges
+Hive's hooks into `/etc/claude-code/managed-settings.json`, keeping every other
+setting. Then finish the steps that name your account, as the install message
+prints:
+
+```sh
+sudo usermod -aG hive "$USER"
+echo "$USER ALL=(hive) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/agentic-hive
+sudo chmod 0440 /etc/sudoers.d/agentic-hive
+sudo systemctl enable --now hive-web.service
+```
+
+Change the dashboard address or port with `systemctl edit hive-web`. A host
+already set up with `install/hive-install` should run its `--uninstall` first;
+the habitat in `/srv/hive` is kept. Upgrades restart only the dashboard, and
+running members pick up the new commands on their next hook.
 
 ## Quick start on NixOS
 
@@ -506,11 +538,38 @@ Restart refuses while the member is working unless `--force` is supplied.
 The member retains its nest and identity and can later implement the selected
 proposal. No permanent designer role is needed.
 
+## Harness adapters
+
+Every harness reaches the same lifecycle: SessionStart, UserPromptSubmit,
+PostToolUse, Stop and SessionEnd, all served by `hive-hook`.
+
+- **Claude Code** reads managed hooks from `/etc/claude-code/managed-settings.json`.
+- **Codex** gets user-level hooks in `~/.codex/hooks.json` at launch.
+- **OpenCode** runs with `--standalone`, so its private server inherits the
+  member's environment, and `--auto`. `hive-launch` links the server plugin
+  `share/opencode/agentic-hive` into `~/.config/opencode/plugins/`. The
+  plugin adds the member instructions to each model call. It persists Room
+  context by appending it to the submitted prompt or to a completed tool
+  result, and it ignores subagent sessions. A conversation ID is assigned at
+  launch so a woken member can receive a prompt at once. `--session` resumes it.
+- **Antigravity** (`agy`) loads the plugin `share/antigravity/agentic-hive`
+  through `~/.gemini/config/plugins.json`. Its SessionStart and PreInvocation
+  hooks inject context as system messages, and the member instructions arrive
+  with SessionStart. The launch directory is added to agy's trusted
+  workspaces so no trust dialog blocks prompt delivery. agy creates a
+  conversation only with its first prompt, so the member's Hive session is a
+  per-launch ID. The conversation ID is recorded separately and resumed with
+  `--conversation`.
+
+Both plugins do nothing outside a member session (no `HIVE_MEMBER`). The
+model is never chosen by Hive: each harness keeps its own last-used model unless
+you pass one after `--` to `hive-launch`.
+
 ## Current scope
 
-Hive targets systemd Linux and supports both a portable installer and a NixOS
-module, and includes Claude Code and Codex launch and hook adapters. OpenCode
-and stronger sandbox levels remain planned. The design stays small: members plan
+Hive targets systemd Linux and supports a portable installer, an Arch `-git`
+package, and a NixOS module, and includes Claude Code, Codex, OpenCode and
+Antigravity launch and hook adapters. Stronger sandbox levels remain planned. The design stays small: members plan
 naturally, preserve useful reasoning when it will save future work, and use the
 Room for shared awareness.
 
@@ -525,7 +584,10 @@ the dashboard's network exposure before using Hive on sensitive projects.
 | [bin/hive](bin/hive) | Room, claims, observation, and knowledge CLI. |
 | [bin/hive-member](bin/hive-member) | Member lifecycle and prompt delivery. |
 | [bin/hive-launch](bin/hive-launch) | Persistent `tmux` sessions. |
-| [bin/hive-hook](bin/hive-hook) | Claude Code and Codex event adapters. |
+| [bin/hive-hook](bin/hive-hook) | Claude Code, Codex, OpenCode and Antigravity event adapters. |
+| [share/opencode](share/opencode) | OpenCode server plugin. |
+| [share/antigravity](share/antigravity) | Antigravity (`agy`) plugin and hooks. |
+| [packaging/arch](packaging/arch) | AUR `agentic-hive-git` package. |
 | [bin/hive-web](bin/hive-web) | Browser dashboard server. |
 | [nix/module.nix](nix/module.nix) | NixOS user, service, and package setup. |
 | [install/hive-install](install/hive-install) | Portable systemd installer for user, habitat, services and hooks. |
@@ -554,6 +616,7 @@ bash test/smoke.sh
 bash test/session.sh
 python3 test/web.py
 python3 test/config.py
+python3 test/harnesses.py
 python3 test/runtime.py
 python3 test/messages.py
 PYTHONPATH=test python3 -m unittest delivery_reconciliation

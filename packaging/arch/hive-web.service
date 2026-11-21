@@ -1,0 +1,49 @@
+# Change the address or port with `systemctl edit hive-web`, e.g.
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/bin/hive-web --address 0.0.0.0 --port 8080
+# Anyone who reaches the dashboard can drive member terminals and a host
+# shell as the hive user; keep it on loopback unless you mean otherwise.
+[Unit]
+Description=Agentic Hive Beekeeper dashboard
+After=network.target agentic-hive-init.service
+
+[Service]
+User=hive
+Group=hive
+Environment=HIVE_ROOT=/srv/hive
+Environment=HIVE_USER=hive
+Environment=HIVE_SHARE=/usr/share/agentic-hive
+Environment=HIVE_BIN_DIR=/usr/bin
+# git refuses repos owned by another user unless marked safe.
+Environment=GIT_CONFIG_COUNT=1
+Environment=GIT_CONFIG_KEY_0=safe.directory
+Environment=GIT_CONFIG_VALUE_0=*
+# Web controls launch member harnesses and a host shell through this
+# service. Their binaries must be in its PATH, not only the login profile.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/hive-web --address 127.0.0.1 --port 8080
+NoNewPrivileges=true
+ProtectSystem=strict
+# The browser host shell needs the hive account's own home for history
+# and normal CLI configuration; Unix permissions still separate users.
+ProtectHome=false
+# CLI delivery/probes and harnesses use mktemp. Keep /tmp shared so
+# dashboard clients can reach the existing tmux server sockets there.
+ReadWritePaths=/srv/hive /home/hive /tmp
+PrivateTmp=false
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+# The dashboard launches Node/Bun harnesses; they need executable JIT memory.
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

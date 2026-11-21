@@ -109,7 +109,9 @@ TMUX_CONF=/etc/tmux.conf.d/agentic-hive.conf
 HOOKS=/etc/claude-code/managed-settings.json
 
 BIN_FILES=(hive hive-hook hive-launch hive-dash hive-web hive-attach hive-statusline hive-member hive-session)
-SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py hive_devlogs.py hive_runtime.py hive_messages.py hive_prompt.py hive_inspect.py guidance/product-design.md guidance/devlogs.md)
+SHARE_FILES=(member-instruction.md dashboard.html xterm.js xterm.css hive_members.py hive_config.py hive_devlogs.py hive_runtime.py hive_messages.py hive_prompt.py hive_inspect.py guidance/product-design.md guidance/devlogs.md
+  opencode/agentic-hive/index.js opencode/agentic-hive/package.json
+  antigravity/agentic-hive/plugin.json antigravity/agentic-hive/hooks.json antigravity/agentic-hive/hook.sh)
 
 # Assets ship next to this script in the repo (install/ sits beside bin/ and share/).
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -195,6 +197,7 @@ install_packages() {
     done
     note "Harnesses are installed by the user upstream — Hive never installs them:"
     note "  claude: see https://claude.com/claude-code   codex: see the OpenAI Codex CLI"
+    note "  opencode: see https://opencode.ai   antigravity: the Antigravity CLI (agy)"
     if (( DO_DEPS )) && [[ -z $STAGE ]]; then
       die "install the packages above and re-run, or pass --no-deps"
     fi
@@ -540,6 +543,8 @@ summary() {
   note "Sign in to the agent harnesses as $HIVE_USER (Hive never installs them):"
   note "  sudo -u $HIVE_USER -i claude"
   note "  sudo -u $HIVE_USER -i codex login"
+  note "  sudo -u $HIVE_USER -i opencode auth"
+  note "  sudo -u $HIVE_USER -i agy"
 }
 
 # --- main -------------------------------------------------------------------

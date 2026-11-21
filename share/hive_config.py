@@ -80,14 +80,46 @@ def merge(current, desired, remove=False):
     return result
 
 
-def update(path, desired, remove=False):
+def plugin_entries(current, directory):
+    """Register Hive's Antigravity plugin directory in a plugins.json.
+
+    Earlier Hive entries (another install prefix or package path) are replaced;
+    every other entry and key is preserved.
+    """
+    if not isinstance(current, dict):
+        raise ValueError("plugins.json must be a JSON object")
+    result = copy.deepcopy(current)
+    entries = result.get("entries", [])
+    if not isinstance(entries, list):
+        raise ValueError("plugins.json entries must be an array")
+    ours = str(Path(directory))
+    kept = [e for e in entries if not (isinstance(e, dict) and isinstance(e.get("path"), str)
+            and (e["path"] == ours or e["path"].rstrip("/").endswith("/agentic-hive/antigravity")))]
+    result["entries"] = kept + [{"path": ours}]
+    return result
+
+
+def trusted(current, directory):
+    """Add a launch directory to Antigravity's trusted workspaces."""
+    if not isinstance(current, dict):
+        raise ValueError("settings must be a JSON object")
+    result = copy.deepcopy(current)
+    workspaces = result.get("trustedWorkspaces", [])
+    if not isinstance(workspaces, list):
+        raise ValueError("trustedWorkspaces must be an array")
+    if directory not in workspaces:
+        result["trustedWorkspaces"] = workspaces + [directory]
+    return result
+
+
+def update(path, desired, remove=False, transform=None):
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(path) + ".hive.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         previous = path.stat() if path.exists() else None
         current = json.loads(path.read_text()) if previous else {}
-        result = merge(current, desired, remove)
+        result = transform(current) if transform else merge(current, desired, remove)
         if previous and result == current:
             return
         fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
@@ -113,11 +145,19 @@ def update(path, desired, remove=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("merge", "remove"))
+    parser.add_argument("action", choices=("merge", "remove", "antigravity-plugin", "antigravity-trust"))
     parser.add_argument("path")
+    parser.add_argument("directory", nargs="?")
     args = parser.parse_args()
+    if args.action.startswith("antigravity-") and not args.directory:
+        parser.error(f"{args.action} requires a directory")
     try:
         import sys
-        update(args.path, json.load(sys.stdin), args.action == "remove")
+        if args.action == "antigravity-plugin":
+            update(args.path, None, transform=lambda current: plugin_entries(current, args.directory))
+        elif args.action == "antigravity-trust":
+            update(args.path, None, transform=lambda current: trusted(current, args.directory))
+        else:
+            update(args.path, json.load(sys.stdin), args.action == "remove")
     except (OSError, ValueError, TypeError) as error:
         parser.exit(1, f"hive-config: {error}; existing settings left intact\n")

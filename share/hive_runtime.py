@@ -80,6 +80,12 @@ OPTIONS = {
         ),
         "--effort": ("effort", r"low|medium|high|max"),
     },
+    "antigravity": {
+        "--model": ("model", r"[A-Za-z0-9_./:() -]{1,128}"),
+        "--effort": ("effort", r"low|medium|high|xhigh|max"),
+        "--mode": ("mode", r"accept-edits|auto|plan"),
+        "--agent": ("agent", r"[A-Za-z0-9_.-]{1,64}"),
+    },
 }
 
 

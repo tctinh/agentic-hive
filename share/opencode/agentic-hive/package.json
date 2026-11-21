@@ -1,0 +1,8 @@
+{
+  "name": "agentic-hive",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}

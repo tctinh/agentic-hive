@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hive-launch — start or attach a persistent member session in tmux.
 #
-#   hive-launch <member> [claude|codex] [dir] [-- harness args...]
+#   hive-launch <member> [claude|codex|opencode|antigravity] [dir] [-- harness args...]
 #   hive-launch --list
 #
 # Members run as the `hive` account. When invoked by another user (the
@@ -41,6 +41,47 @@ install_codex_hooks() {
   python3 "$SHARE/hive_config.py" merge "$f" <<<"$want" || die "could not preserve Codex hook configuration"
 }
 
+# OpenCode discovers global plugin directories under its config directory. The
+# plugin is inert outside member sessions (no HIVE_MEMBER), so linking it for
+# the whole hive account is safe; relinking follows host updates.
+install_opencode_plugin() {
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins" link
+  link="$dir/agentic-hive"
+  [[ -d $SHARE/opencode/agentic-hive ]] || { echo "hive-launch: OpenCode plugin not found; OpenCode runs without Room awareness" >&2; return 0; }
+  if [[ -e $link && ! -L $link ]]; then
+    echo "hive-launch: $link is not a Hive-managed link; leaving it as is" >&2
+    return 0
+  fi
+  mkdir -p "$dir" && ln -sfn "$SHARE/opencode/agentic-hive" "$link" || die "could not install the OpenCode plugin link"
+}
+
+# Antigravity reads extra plugin directories from ~/.gemini/config/plugins.json.
+# A launch directory must also be trusted, or agy opens a trust dialog that no
+# Hive prompt can answer.
+install_antigravity_plugin() {
+  local config="${GEMINI_CONFIG_DIR:-$HOME/.gemini/config}" settings="$HOME/.gemini/antigravity-cli/settings.json"
+  [[ -d $SHARE/antigravity/agentic-hive ]] || { echo "hive-launch: Antigravity plugin not found; agy runs without Room awareness" >&2; return 0; }
+  python3 "$SHARE/hive_config.py" antigravity-plugin "$config/plugins.json" "$SHARE/antigravity" ||
+    die "could not preserve Antigravity plugin configuration"
+  python3 "$SHARE/hive_config.py" antigravity-trust "$settings" "$PWD" ||
+    die "could not preserve Antigravity settings"
+}
+
+# Value of a harness option in "$@" (--opt value or --opt=value), if present.
+option_value() {
+  local want=("$1" "$2") arg o; shift 2
+  while (($#)); do
+    arg=$1; shift
+    [[ $arg == -- ]] && return 1
+    for o in "${want[@]}"; do
+      [[ -n $o ]] || continue
+      if [[ $arg == "$o" ]]; then printf '%s' "${1:-}"; return 0; fi
+      if [[ $arg == "$o="* ]]; then printf '%s' "${arg#*=}"; return 0; fi
+    done
+  done
+  return 1
+}
+
 # Inner mode: runs inside the tmux pane.
 if [[ ${1:-} == --run ]]; then
   shift
@@ -58,6 +99,34 @@ if [[ ${1:-} == --run ]]; then
       install_codex_hooks
       codex --approve-for-me --add-dir "$HIVE_ROOT" -c "developer_instructions=$(jq -Rs . <"$SHARE/member-instruction.md")" "$@" || true
       ;;
+    opencode)
+      install_opencode_plugin
+      # A private server inherits this member's environment, which the Hive
+      # plugin needs. Name the conversation up front so the member has an
+      # identity before its first prompt; --session also resumes.
+      if ! sid=$(option_value --session -s "$@"); then
+        if option_value --continue -c "$@" >/dev/null; then
+          sid=""
+        else
+          sid="ses_$(python3 -c 'import secrets; print(secrets.token_hex(13))')"
+          set -- --session "$sid" "$@"
+        fi
+      fi
+      HIVE_OPENCODE_SESSION="$sid" opencode --standalone --auto "$@" || true
+      ;;
+    antigravity)
+      install_antigravity_plugin
+      # agy creates its conversation with the first prompt. A per-launch session
+      # identity lets Hive deliver that first prompt; the conversation ID is
+      # recorded separately for resume.
+      export HIVE_AGY_SESSION="agy_$(python3 -c 'import uuid; print(uuid.uuid4())')"
+      conversation=$(option_value --conversation "" "$@") || conversation=""
+      hook="${HIVE_BIN_DIR:+$HIVE_BIN_DIR/hive-hook}"
+      [[ -n $hook && -x $hook ]] || hook=hive-hook
+      jq -n --arg c "$conversation" --arg cwd "$PWD" '{conversationId: $c, cwd: $cwd}' |
+        "$hook" antigravity Launch >/dev/null 2>&1 || true
+      agy --add-dir "$HIVE_ROOT" "$@" || true
+      ;;
     *) die "unknown harness: $harness" ;;
   esac
   echo
@@ -71,11 +140,13 @@ if [[ ${1:-} == --list ]]; then
   exit 0
 fi
 
-member="${1:-}"; [[ -n $member ]] || die "usage: hive-launch <member> [claude|codex] [dir] [-- args...]"
+member="${1:-}"; [[ -n $member ]] || die "usage: hive-launch <member> [claude|codex|opencode|antigravity] [dir] [-- args...]"
 shift
 harness=claude
 dir="$HIVE_ROOT/projects"
 [[ $# -gt 0 && $1 != -- ]] && { harness="$1"; shift; }
+[[ $harness != agy ]] || harness=antigravity
+case $harness in claude | codex | opencode | antigravity) ;; *) die "unknown harness: $harness" ;; esac
 [[ $# -gt 0 && $1 != -- ]] && { dir="$1"; shift; }
 [[ ${1:-} == -- ]] && shift
 [[ -d $dir ]] || die "no such directory: $dir"

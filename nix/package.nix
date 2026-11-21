@@ -42,6 +42,8 @@ stdenvNoCC.mkDerivation {
     install -Dm644 -t $out/share/agentic-hive share/member-instruction.md share/dashboard.html share/xterm.js share/xterm.css share/hive_members.py share/hive_config.py share/hive_devlogs.py share/hive_runtime.py share/hive_messages.py share/hive_prompt.py share/hive_inspect.py
     install -Dm644 share/guidance/product-design.md $out/share/agentic-hive/guidance/product-design.md
     install -Dm644 share/guidance/devlogs.md $out/share/agentic-hive/guidance/devlogs.md
+    install -Dm644 -t $out/share/agentic-hive/opencode/agentic-hive share/opencode/agentic-hive/index.js share/opencode/agentic-hive/package.json
+    install -Dm644 -t $out/share/agentic-hive/antigravity/agentic-hive share/antigravity/agentic-hive/plugin.json share/antigravity/agentic-hive/hooks.json share/antigravity/agentic-hive/hook.sh
     patchShebangs $out/bin
     for f in $out/bin/*; do
       wrapProgram "$f" \
@@ -75,6 +77,7 @@ stdenvNoCC.mkDerivation {
   meta = {
     description = "Agentic Hive Core: a shared Unix habitat for persistent coding agents";
     mainProgram = "hive";
+    license = lib.licenses.mit;
     platforms = lib.platforms.linux;
   };
 }

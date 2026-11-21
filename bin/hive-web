@@ -357,6 +357,23 @@ class TerminalBridge:
                 pass
 
 
+def cpu_temp():
+    """Average CPU core temperature in °C from the coretemp/k10temp hwmon, else None."""
+    cores, package = [], []
+    for hw in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
+        if read(hw / "name") not in ("coretemp", "k10temp", "zenpower"):
+            continue
+        for inp in sorted(hw.glob("temp*_input")):
+            try:
+                value = int(read(inp)) / 1000
+            except ValueError:
+                continue
+            label = read(str(inp)[:-6] + "_label").lower()
+            (cores if label.startswith(("core", "tccd")) else package).append(value)
+    values = cores or package
+    return round(sum(values) / len(values), 1) if values else None
+
+
 def host():
     mem = {}
     for line in read("/proc/meminfo").splitlines():
@@ -367,6 +384,7 @@ def host():
         "hostname": os.uname().nodename,
         "cpu_percent": CPU.percent(),
         "cpus": os.cpu_count(),
+        "cpu_temp": cpu_temp(),
         "load": [float(x) for x in read("/proc/loadavg").split()[:3]],
         "mem_total": mem.get("MemTotal"),
         "mem_used": mem.get("MemTotal", 0) - mem.get("MemAvailable", 0),
@@ -376,12 +394,17 @@ def host():
     }
 
 
+# Harnesses whose executable is named differently.
+PROCESS_NAMES = {"antigravity": "agy"}
+
+
 def alive(pid, harness):
     if not isinstance(pid, int) or pid <= 1:
         return False
     comm = read(f"/proc/{pid}/comm")
     if not harness:
         return False
+    harness = PROCESS_NAMES.get(harness, harness)
     if comm.startswith(harness) or comm.startswith("." + harness):
         return True
     return comm.startswith("node") and f"/{harness}" in read(f"/proc/{pid}/cmdline")

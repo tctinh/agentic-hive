@@ -1,0 +1,16 @@
+{
+  "agentic-hive": {
+    "SessionStart": [
+      { "type": "command", "command": "sh ./hook.sh SessionStart", "timeout": 20 }
+    ],
+    "PreInvocation": [
+      { "type": "command", "command": "sh ./hook.sh PreInvocation", "timeout": 20 }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "sh ./hook.sh PostToolUse", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "type": "command", "command": "sh ./hook.sh Stop", "timeout": 10 }
+    ]
+  }
+}

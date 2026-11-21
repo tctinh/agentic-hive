@@ -354,6 +354,33 @@ def trailing_footer(rows, cursor):
     return start if start > cursor + 1 and not rows[start - 1].strip() else None
 
 
+def boxed_composer(rows, cursor):
+    """OpenCode's input box: a left rule "┃" bounded below by "╹▀▀▀".
+
+    Its first row is padding; its last two are padding and the agent/model
+    line. Columns beyond the box (a session sidebar) are not input.
+    """
+    match = re.match(r"^(\s*)┃", rows[cursor])
+    if not match:
+        return None
+    rule = match[1] + "┃"
+    top = cursor
+    while top > 0 and rows[top - 1].startswith(rule):
+        top -= 1
+    bottom = cursor
+    while bottom + 1 < len(rows) and rows[bottom + 1].startswith(rule):
+        bottom += 1
+    edge = rows[bottom + 1] if bottom + 1 < len(rows) else ""
+    if not re.match(r"^" + re.escape(match[1]) + r"╹▀+", edge) or bottom - top < 3 or not top < cursor < bottom - 1:
+        return None
+    width = len(edge.rstrip()) - len(rule)
+    parts = []
+    for row in rows[top + 1:bottom - 1]:
+        text = row[len(rule):len(rule) + width]
+        parts.append(text[2:] if text.startswith("  ") else text.lstrip())
+    return parts
+
+
 def composer(rows, cursor, *, owned=False, expected=None):
     """Read only the cursor's contiguous composer, bounded by non-input rows.
 
@@ -363,6 +390,11 @@ def composer(rows, cursor, *, owned=False, expected=None):
     """
     if not 0 <= cursor < len(rows):
         return None
+    if re.match(r"^\s*┃", rows[cursor]):
+        return boxed_composer(rows, cursor)
+    # Antigravity's empty composer is a bare ">" once trailing space is trimmed.
+    if rows[cursor].rstrip() == ">" and cursor + 1 < len(rows) and rows[cursor + 1].startswith("─"):
+        return [""]
     # A native resume selector uses the same arrow as the input box. It is a
     # dialog, never a place to paste a prompt or confirm a directory choice.
     if (re.match(r"^[›❯][ \u00a0][1-4]\. (?:Use|Always use) (?:session|current) directory", rows[cursor])
@@ -371,7 +403,7 @@ def composer(rows, cursor, *, owned=False, expected=None):
     start = cursor
     while cursor - start < 128:
         line = rows[start]
-        match = re.match(r"^[›❯][ \u00a0](.*)$", line)
+        match = re.match(r"^[›❯>][ \u00a0](.*)$", line)
         if match:
             parts = [match[1]]
             for row in rows[start + 1:cursor + 1]:
@@ -427,12 +459,23 @@ def matches(parts, message):
     return len(expected) in positions
 
 
+# Placeholder text shown by an empty composer, per harness.
+PLACEHOLDERS = (
+    r"Ask Codex to do anything",
+    r'Ask anything… ".*"',  # OpenCode
+    r"(?:Auto|Plan|Accept-edits) mode: [^\n]*\(shift\+tab to cycle\)",  # Antigravity
+)
+
+
 def empty(parts):
-    return parts is not None and normalized("\n".join(parts)) in ("", "Ask Codex to do anything")
+    if parts is None:
+        return False
+    text = normalized("\n".join(parts))
+    return text == "" or any(re.fullmatch(pattern, text) for pattern in PLACEHOLDERS)
 
 
 def collapsed(parts):
-    return parts is not None and re.fullmatch(r"\[Pasted (?:Content|text) [^\]\n]+\]", normalized("\n".join(parts))) is not None
+    return parts is not None and re.fullmatch(r"\[Pasted (?:(?:Content|text) [^\]\n]+|~[0-9]+ lines?)\]", normalized("\n".join(parts))) is not None
 
 
 def terminal_snapshot(member, run, *, owned=False, expected=None):

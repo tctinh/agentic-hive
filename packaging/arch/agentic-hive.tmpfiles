@@ -1,0 +1,6 @@
+# The hive account's home holds harness logins and configuration.
+d /home/hive 0750 hive hive -
+# Setgid + default ACL: everything created in the habitat stays
+# group-writable for hive and the Beekeeper regardless of umask.
+d /srv/hive 2770 hive hive -
+a+ /srv/hive - - - - default:group:hive:rwX,group:hive:rwX,default:user:hive:rwX

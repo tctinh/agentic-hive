@@ -49,6 +49,7 @@ process_alive() {
   local harness pid comm args checked=0 queue=() children=()
   harness=$(launch "$1" .harness); harness=${harness:-$(tele "$1" .harness)}
   [[ -n $harness ]] || return 1
+  [[ $harness != antigravity ]] || harness=agy
   mapfile -t queue < <(tmux list-panes -t "=hive-$1" -F '#{pane_pid}' 2>/dev/null)
   while ((${#queue[@]} && checked < 256)); do
     pid=${queue[0]}; queue=("${queue[@]:1}")
@@ -174,6 +175,8 @@ cmd_wake() (
   dir=${dir:-$(launch "$m" .dir)}; dir=${dir:-$(tele "$m" .cwd)}; dir=${dir:-$HIVE_ROOT/projects}
   [[ -d $dir ]] || die "directory $dir no longer exists"
   sid=$(tele "$m" .session_id)
+  # Antigravity's resumable conversation is distinct from its Hive session.
+  [[ $harness != antigravity ]] || sid=$(tele "$m" .conversation_id)
 
   mapfile -d '' -t args < <(python3 "${MEMBER_HELPER%/*}/hive_runtime.py" launch-args "$HIVE_ROOT/members/$m/state/launch.json")
   if ((!fresh)) && [[ -n $sid ]]; then
@@ -183,6 +186,8 @@ cmd_wake() (
       # --cd, Codex asks which directory to use when the resumed session's last
       # cwd differs; that selector cannot receive a Hive prompt.
       codex) args+=(resume "$sid" --cd "$dir") ;;
+      opencode) args+=(--session "$sid") ;;
+      antigravity) args+=(--conversation "$sid") ;;
     esac
     say "waking $m ($harness in $dir), resuming conversation $sid"
   else

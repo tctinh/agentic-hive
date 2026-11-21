@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# hive-hook <harness> <event> — harness adapter for Agentic Hive (claude, codex).
+# hive-hook <harness> <event> — harness adapter for Agentic Hive
+# (claude, codex, opencode, antigravity).
 #
 # Installed as a lifecycle hook for SessionStart, UserPromptSubmit,
 # PostToolUse, Stop and SessionEnd. Reads the hook JSON on stdin. Claude Code
-# and Codex share the hookSpecificOutput.additionalContext output format.
+# and Codex share the hookSpecificOutput.additionalContext output format; the
+# OpenCode plugin (share/opencode) speaks that format too. Antigravity's
+# native events and injectSteps output are translated below.
 #
 # Contract (SPEC §12): silent unless something new happened; never fails or
 # blocks the harness; does nothing at all when HIVE_MEMBER is unset.
@@ -25,6 +28,39 @@ SHARE="${HIVE_SHARE:-$(dirname "$(readlink -f "$0")")/../share/agentic-hive}"
 input=$(cat 2>/dev/null || true)
 field() { jq -r "$1 // empty" <<<"$input" 2>/dev/null || true; }
 
+# Process name of each harness, for telemetry PIDs.
+process_name=$harness
+[[ $harness != antigravity ]] || process_name=agy
+
+# Antigravity (agy): translate native events into the shared lifecycle.
+#   Launch                -> SessionStart telemetry only, from hive-launch
+#   SessionStart          -> SessionStart (fires with the first prompt)
+#   PreInvocation, n == 0 -> UserPromptSubmit (a new user turn)
+#   PreInvocation, n > 0  -> PostToolUse (after the turn's tool calls)
+#   PostToolUse           -> telemetry only; agy cannot inject context there
+#   Stop                  -> Stop
+# hive-launch assigns HIVE_AGY_SESSION so the member's session identity exists
+# before agy creates a conversation; the conversation ID is kept for resume.
+agy_launch=0 agy_instructions=0
+if [[ $harness == antigravity ]]; then
+  case $event in
+    Launch) event=SessionStart; agy_launch=1 ;;
+    SessionStart) agy_instructions=1 ;;
+    PreInvocation)
+      if [[ $(field .invocationNum) =~ ^[1-9][0-9]*$ ]]; then event=PostToolUse; else event=UserPromptSubmit; fi
+      ;;
+    PostToolUse) event=ToolUse ;;
+  esac
+  input=$(jq -c --arg ev "$event" --arg sid "${HIVE_AGY_SESSION:-}" '{
+      hook_event_name: $ev,
+      session_id: (if $sid != "" then $sid else .conversationId end),
+      conversation_id: .conversationId,
+      cwd: .cwd,
+      tool_name: .toolCall.name
+    } + (if $ev == "UserPromptSubmit" and (.lastUserInput | type) == "string" then {prompt: .lastUserInput} else {} end)
+    | with_entries(select(.value != null))' <<<"${input:-"{}"}" 2>/dev/null) || input='{}'
+fi
+
 nest="$HIVE_ROOT/members/$m"
 [[ -d $nest ]] || hive join "$m" >/dev/null 2>&1 || exit 0
 
@@ -45,7 +81,7 @@ harness_pid() { # walk up from the hook's parent to the harness process
   for i in 1 2 3 4 5; do
     [[ -r /proc/$p/comm ]] || break
     comm=$(cat "/proc/$p/comm")
-    [[ $comm == "$harness"* || $comm == ".$harness"* || $comm == node* ]] && { printf '%s' "$p"; return; }
+    [[ $comm == "$process_name"* || $comm == ".$process_name"* || $comm == node* ]] && { printf '%s' "$p"; return; }
     p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null) || break
     [[ $p -gt 1 ]] || break
   done
@@ -78,7 +114,7 @@ telemetry() { # status
     --arg harness "$harness" --arg member "$m" --arg status "$1" --arg pid "$pid" \
     --arg started "$started" --arg now "$(date --iso-8601=seconds)" \
     --arg cwd "$cwd" --arg branch "$branch" --arg tool "$(field .tool_name)" \
-    --arg session "$(field .session_id)" \
+    --arg session "$(field .session_id)" --arg conversation "$(field .conversation_id)" \
     --arg event "$event" --arg event_id "$(date +%s%N)" \
     --argjson delivered "$(read_int "$cursor_file")" '
       {
@@ -89,6 +125,7 @@ telemetry() { # status
         event_id: $event_id,
         pid: ($pid | tonumber? // null),
         session_id: (if $session != "" then $session elif $event == "SessionStart" then null else $prev.session_id end),
+        conversation_id: (if $conversation != "" then $conversation elif $event == "SessionStart" then null else $prev.conversation_id end),
         started_at: (if $started == "" then null else $started end),
         last_activity: $now,
         cwd: $cwd,
@@ -254,9 +291,15 @@ core_hint() {
   printf '%s\n' "$current" >"$marker" 2>/dev/null || true
 }
 
+lifecycle() {
 case $event in
   SessionStart)
     rm -f "$nest/state/quota-attempt" 2>/dev/null || true
+    if ((agy_launch)); then
+      # The pane is ready for input; nothing can be injected until a prompt.
+      telemetry idle
+      return 0
+    fi
     telemetry working
     deliver "$(session_header)"
     ;;
@@ -287,8 +330,25 @@ case $event in
       (python3 "$SHARE/hive_messages.py" drain "$m" >/dev/null 2>&1) </dev/null &
     fi
     ;;
+  ToolUse)
+    telemetry working
+    ;;
   SessionEnd)
     telemetry ended
     ;;
 esac
+return 0
+}
+
+if [[ $harness == antigravity ]]; then
+  # Persist delivered context as system messages; always answer with JSON.
+  extra=""
+  ((agy_instructions)) && extra=$(cat "$SHARE/member-instruction.md" 2>/dev/null || true)
+  lifecycle | jq -cs --arg extra "$extra" '
+    ([$extra | select(. != "")] + [.[] | .hookSpecificOutput.additionalContext? // empty | select(. != "")]) as $context
+    | if ($context | length) > 0 then {injectSteps: [$context[] | {systemMessage: {systemMessage: .}}]} else {} end' 2>/dev/null ||
+    printf '{}\n'
+else
+  lifecycle
+fi
 exit 0

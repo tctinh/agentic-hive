@@ -1,0 +1,17 @@
+[Unit]
+Description=Initialize Agentic Hive habitat (idempotent)
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+User=hive
+Group=hive
+UMask=0002
+Environment=HIVE_ROOT=/srv/hive
+Environment=HIVE_USER=hive
+Environment=HIVE_SHARE=/usr/share/agentic-hive
+Environment=HIVE_BIN_DIR=/usr/bin
+ExecStart=/usr/bin/hive init
+
+[Install]
+WantedBy=multi-user.target

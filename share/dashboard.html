@@ -313,6 +313,7 @@
 
   <div class="host">
     <div class="stat"><div class="k">CPU</div><div class="v" id="cpu">–</div><div class="bar"><i id="cpu-bar"></i></div></div>
+    <div class="stat"><div class="k">CPU temp (avg)</div><div class="v" id="cpu-temp">–</div><div class="bar"><i id="cpu-temp-bar"></i></div></div>
     <div class="stat"><div class="k">Memory</div><div class="v" id="mem">–</div><div class="bar"><i id="mem-bar"></i></div></div>
     <div class="stat"><div class="k">Disk (hive)</div><div class="v" id="disk">–</div><div class="bar"><i id="disk-bar"></i></div></div>
     <div class="stat"><div class="k">Load</div><div class="v" id="load">–</div><div class="bar"><i id="load-bar"></i></div></div>
@@ -1000,6 +1001,7 @@ function render(d) {
   renderAttention(d);
 
   $("cpu").textContent = h.cpu_percent == null ? "–" : h.cpu_percent + "%"; bar("cpu-bar", h.cpu_percent || 0);
+  $("cpu-temp").textContent = h.cpu_temp == null ? "–" : h.cpu_temp.toFixed(0) + "°C"; bar("cpu-temp-bar", h.cpu_temp || 0);
   $("mem").textContent = `${gib(h.mem_used)} / ${gib(h.mem_total)} GiB`; bar("mem-bar", 100 * h.mem_used / h.mem_total);
   $("disk").textContent = `${gib(h.disk_used)} / ${gib(h.disk_total)} GiB`; bar("disk-bar", 100 * h.disk_used / h.disk_total);
   $("load").textContent = h.load.map(x => x.toFixed(2)).join(" "); bar("load-bar", 100 * h.load[0] / h.cpus);

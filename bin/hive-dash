@@ -73,16 +73,17 @@ quota_line() {
 
 # member -> "state|pid|harness|last|cwd|branch|tool|delivered"
 member_row() {
-  local m="$1" t="$HIVE_ROOT/telemetry/members/$1.json" j pid status harness last state
+  local m="$1" t="$HIVE_ROOT/telemetry/members/$1.json" j pid status harness proc last state
   j=$(cat "$t" 2>/dev/null) || j='{}'
   pid=$(jq -r '.pid // empty' <<<"$j" 2>/dev/null)
   status=$(jq -r '.status // empty' <<<"$j" 2>/dev/null)
   harness=$(jq -r '.harness // "-"' <<<"$j" 2>/dev/null)
   last=$(jq -r '.last_activity // empty' <<<"$j" 2>/dev/null)
+  proc=$harness; [[ $harness != antigravity ]] || proc=agy
 
   if [[ -z $j || $j == '{}' ]]; then
     state=never
-  elif [[ -n $pid && -d /proc/$pid ]] && [[ $(cat "/proc/$pid/comm" 2>/dev/null) == @($harness*|node*|.$harness*) ]]; then
+  elif [[ -n $pid && -d /proc/$pid ]] && [[ $(cat "/proc/$pid/comm" 2>/dev/null) == @($proc*|node*|.$proc*) ]]; then
     case $status in working|idle) state=$status ;; *) state=unknown ;; esac
   else
     state=dead

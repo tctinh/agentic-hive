@@ -26,6 +26,7 @@ sudo install/hive-install --beekeeper alice --uninstall
 | `--no-deps` | off | Skip package installation (the package list is still printed). |
 | `--dry-run` | off | Print every action as `would ...`, change nothing. |
 | `--uninstall` | off | Restore owned files and remove only accounts/groups created by this installer. |
+| `--keep-account` | off | With `--uninstall`, keep the hive account, group and Beekeeper membership (for example when moving to the Arch package). |
 
 The root-only journal at `/var/lib/agentic-hive-install` records original files
 and account ownership across reinstalls. Use the same account, habitat, prefix,

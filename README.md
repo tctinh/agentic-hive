@@ -486,8 +486,11 @@ sudo systemctl enable --now hive-web.service
 ```
 
 Change the dashboard address or port with `systemctl edit hive-web`. A host
-already set up with `install/hive-install` should run its `--uninstall` first;
-the habitat in `/srv/hive` is kept. Upgrades restart only the dashboard, and
+already set up with `install/hive-install` should first run
+`sudo install/hive-install --beekeeper "$USER" --uninstall --keep-account`.
+This keeps the `hive` account that owns `/srv/hive`. Without
+`--keep-account`, the package creates a new account with a different UID that
+cannot read the existing habitat. Upgrades restart only the dashboard, and
 running members pick up the new commands on their next hook.
 
 ## Quick start on NixOS

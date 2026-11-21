@@ -25,6 +25,7 @@ DO_HOOKS=1
 DO_DEPS=1
 DRY_RUN=0
 UNINSTALL=0
+KEEP_ACCOUNT=0
 
 usage() {
   cat <<'EOF'
@@ -44,6 +45,8 @@ Usage: hive-install --beekeeper <user> [options]
   --no-deps            do not install packages (the list is still printed)
   --dry-run            print every action as "would ...", change nothing
   --uninstall          remove exactly what a prior install created
+  --keep-account       with --uninstall: keep the hive account, its group and
+                       the Beekeeper's membership (e.g. when moving to a package)
   -h, --help           this text
 
 Environment:
@@ -68,6 +71,7 @@ while (($#)); do
     --no-deps) DO_DEPS=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --keep-account) KEEP_ACCOUNT=1; shift ;;
     --) shift; break ;;
     -*) die "unknown option: $1" ;;
     *) die "unexpected argument: $1" ;;
@@ -495,6 +499,10 @@ uninstall() {
   note "  uninstall never removes habitat state — delete $HIVE_ROOT yourself if you mean to"
   if [[ -z $STAGE ]]; then
     act_ok "reloaded systemd" systemctl daemon-reload
+  fi
+  if (( KEEP_ACCOUNT )); then
+    note "kept account $HIVE_USER, group $HIVE_GROUP and $BEEKEEPER's membership (--keep-account)"
+  elif [[ -z $STAGE ]]; then
     if [[ $(state get added_membership) == true ]]; then
       act "removed $BEEKEEPER from group $HIVE_GROUP" gpasswd -d "$BEEKEEPER" "$HIVE_GROUP"
       state_set added_membership false

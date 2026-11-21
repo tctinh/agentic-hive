@@ -106,10 +106,12 @@ export default {
       instruction = readFileSync(join(share(), "member-instruction.md"), "utf8")
     } catch {}
 
-    let current = process.env.HIVE_OPENCODE_SESSION || ""
+    // OpenCode loads one plugin instance per location (for example after a
+    // session moves into a worktree). They share one member session.
+    const shared = (globalThis.__agenticHive ??= { current: process.env.HIVE_OPENCODE_SESSION || "", ready: undefined })
     const children = new Map()
     const isChild = async (sessionID) => {
-      if (sessionID === current) return false
+      if (sessionID === shared.current) return false
       if (!children.has(sessionID)) {
         try {
           const info = await ctx.session.get({ sessionID })
@@ -122,18 +124,19 @@ export default {
     }
 
     const start = async (sessionID, source) => {
-      current = sessionID
+      shared.current = sessionID
       stash(await hook("SessionStart", { session_id: sessionID, cwd: cwd(), source }))
     }
     // Identity must be visible before the first prompt so hive-member can
-    // deliver a wake message into a fresh conversation.
-    const ready = current ? start(current, "startup") : Promise.resolve()
+    // deliver a wake message into a fresh conversation. Once per process.
+    shared.ready ??= shared.current ? start(shared.current, "startup") : Promise.resolve()
 
-    // A new main conversation (for example /new) starts a new Hive session.
+    // A new main conversation (/new, or a session moved to another location)
+    // starts a new Hive session.
     const follow = async (sessionID) => {
-      await ready
+      await shared.ready
       if (await isChild(sessionID)) return false
-      if (sessionID !== current) await start(sessionID, "new")
+      if (sessionID !== shared.current) await start(sessionID, "new")
       return true
     }
 
@@ -145,11 +148,11 @@ export default {
     })
 
     await ctx.session.hook("context", (event) => {
-      if (instruction && event.sessionID === current) event.system.push({ type: "text", text: instruction })
+      if (instruction && event.sessionID === shared.current) event.system.push({ type: "text", text: instruction })
     })
 
     await ctx.tool.hook("execute.after", async (event) => {
-      if (event.sessionID !== current) return
+      if (event.sessionID !== shared.current) return
       const text = joined(takePending(), await hook("PostToolUse", { session_id: event.sessionID, cwd: cwd(), tool_name: event.tool }))
       if (!text) return
       if (event.status !== "completed") return stash(text)
@@ -168,7 +171,7 @@ export default {
 
     // Turn end. A finished turn reaches the idle hook; an interrupted or
     // failed one does not, so those come from the event stream.
-    const stop = (sessionID) => sessionID === current ? hook("Stop", { session_id: sessionID, cwd: cwd() }) : undefined
+    const stop = (sessionID) => sessionID === shared.current ? hook("Stop", { session_id: sessionID, cwd: cwd() }) : undefined
     await ctx.session.hook("experimental.idle", (event) => stop(event.sessionID))
     const ended = new Set(["session.execution.interrupted", "session.execution.failed"])
     const controller = new AbortController()
@@ -180,9 +183,12 @@ export default {
       } catch {}
     })()
 
+    shared.instances = (shared.instances ?? 0) + 1
     return async () => {
       controller.abort()
-      if (current) await hook("SessionEnd", { session_id: current, cwd: cwd() })
+      // Only the last instance to unload ends the session.
+      shared.instances -= 1
+      if (shared.instances === 0 && shared.current) await hook("SessionEnd", { session_id: shared.current, cwd: cwd() })
     }
   },
 }

@@ -77,15 +77,22 @@ cursor_file="$nest/state/last-delivered-generation"
 # Passive and non-authoritative (SPEC §17). Failures are ignored.
 
 harness_pid() { # walk up from the hook's parent to the harness process
-  local p=$PPID i comm
-  for i in 1 2 3 4 5; do
+  local p=$PPID i comm found=""
+  is_harness() { [[ $1 == "$process_name"* || $1 == ".$process_name"* || $1 == node* ]]; }
+  for i in 1 2 3 4 5 6; do
     [[ -r /proc/$p/comm ]] || break
     comm=$(cat "/proc/$p/comm")
-    [[ $comm == "$process_name"* || $comm == ".$process_name"* || $comm == node* ]] && { printf '%s' "$p"; return; }
+    if is_harness "$comm"; then
+      found=$p
+    elif [[ -n $found ]]; then
+      break
+    fi
     p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null) || break
     [[ $p -gt 1 ]] || break
   done
-  printf '%s' "$PPID"
+  # The outermost harness process (OpenCode's UI above its server, a Node
+  # launcher above Codex) is the one the pane, dashboard and wake checks see.
+  printf '%s' "${found:-$PPID}"
 }
 
 telemetry() { # status

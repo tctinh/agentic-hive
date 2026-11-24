@@ -76,7 +76,7 @@ cursor_file="$nest/state/last-delivered-generation"
 # ------------------------------------------------------------- telemetry
 # Passive and non-authoritative (SPEC §17). Failures are ignored.
 
-harness_pid() { # walk up from the hook's parent to the harness process
+live_harness_pid() { # walk up from the hook's parent to the outermost harness process
   local p=$PPID i comm found=""
   is_harness() { [[ $1 == "$process_name"* || $1 == ".$process_name"* || $1 == node* ]]; }
   for i in 1 2 3 4 5 6; do
@@ -92,11 +92,11 @@ harness_pid() { # walk up from the hook's parent to the harness process
   done
   # The outermost harness process (OpenCode's UI above its server, a Node
   # launcher above Codex) is the one the pane, dashboard and wake checks see.
-  printf '%s' "${found:-$PPID}"
+  printf '%s' "$found"
 }
 
 telemetry() { # status
-  local tfile="$HIVE_ROOT/telemetry/members/$m.json" cwd branch prev tmp pid started
+  local tfile="$HIVE_ROOT/telemetry/members/$m.json" cwd branch prev tmp pid prev_pid cur_pid started now
   mkdir -p "$(dirname "$tfile")" 2>/dev/null || return 0
   cwd=$(field .cwd); cwd=${cwd:-$PWD}
   local cache="$nest/state/git-context" cached_cwd cached_branch cached_at
@@ -109,17 +109,27 @@ telemetry() { # status
   fi
   prev=$(cat "$tfile" 2>/dev/null || echo '{}')
   jq -e . >/dev/null 2>&1 <<<"$prev" || prev='{}'
+  prev_pid=$(jq -r '.pid // empty' <<<"$prev")
+  cur_pid=$(live_harness_pid)
+  now=$(date --iso-8601=seconds)
+  if [[ $event == SessionEnd && -n $cur_pid && -n $prev_pid && $cur_pid != "$prev_pid" && -d /proc/$prev_pid ]]; then
+    # A previous process's SessionEnd must not clobber a newer live session.
+    return 0
+  fi
   if [[ $event == SessionStart ]]; then
-    pid=$(harness_pid); started=$(date --iso-8601=seconds)
+    pid=${cur_pid:-$PPID}; started=$now
   else
-    pid=$(jq -r '.pid // empty' <<<"$prev"); pid=${pid:-$(harness_pid)}
+    # Re-bind to the live harness process whenever visible in /proc so missed
+    # SessionStart or restart races do not leave telemetry stuck on an old PID.
+    pid=${cur_pid:-${prev_pid:-$PPID}}
     started=$(jq -r '.started_at // empty' <<<"$prev")
+    [[ -n $started ]] || started=$now
   fi
   tmp=$(mktemp "$tfile.XXXXXX") || return 0
   jq -n \
     --argjson prev "$prev" \
     --arg harness "$harness" --arg member "$m" --arg status "$1" --arg pid "$pid" \
-    --arg started "$started" --arg now "$(date --iso-8601=seconds)" \
+    --arg started "$started" --arg now "$now" \
     --arg cwd "$cwd" --arg branch "$branch" --arg tool "$(field .tool_name)" \
     --arg session "$(field .session_id)" --arg conversation "$(field .conversation_id)" \
     --arg event "$event" --arg event_id "$(date +%s%N)" \
@@ -149,7 +159,12 @@ telemetry() { # status
 record_prompt() {
   local tmp hash marker
   jq -e '.prompt | type == "string"' <<<"$input" >/dev/null 2>&1 || return 0
-  hash=$(jq -jr '.prompt | gsub("^\\s+|\\s+$"; "")' <<<"$input" | sha256sum | cut -d' ' -f1) || return 0
+  hash=$(jq -jr '
+    .prompt
+    | gsub("^\\s+|\\s+$"; "")
+    | (try capture("^<pasted_content id=\"(?<id>[A-Za-z0-9_-]+)\">\n(?<body>[\\s\\S]*)\n</pasted_content(?: id=\"(?<cid>[A-Za-z0-9_-]+)\")?>$") catch null) as $m
+    | if $m != null and ($m.cid == null or $m.cid == $m.id) then ($m.body | gsub("^\\s+|\\s+$"; "")) else . end
+  ' <<<"$input" | sha256sum | cut -d' ' -f1) || return 0
   tmp=$(mktemp "$nest/state/last-submitted-prompt.XXXXXX") || return 0
   marker="$(date +%s%N) $hash"
   printf '%s\n' "$marker" >"$tmp" &&
@@ -324,7 +339,14 @@ case $event in
       antigravity_quota
       return 0
     fi
-    telemetry working
+    # Claude Code fires SessionStart at startup/resume/clear while sitting idle
+    # at its prompt (Stop will not fire until a turn runs). Only mid-turn
+    # compaction remains working.
+    if [[ $harness == claude && $(field .source) != compact ]]; then
+      telemetry idle
+    else
+      telemetry working
+    fi
     deliver "$(session_header)"
     [[ $harness == antigravity ]] && antigravity_quota
     ;;
@@ -341,13 +363,13 @@ case $event in
       quiet_nudge
     )"
     ;;
-  PostToolUse)
+  PostToolUse | PostToolUseFailure)
     telemetry working
     deliver "$(profile_hint)"
     [[ $harness == codex ]] && codex_quota
     [[ $harness == antigravity ]] && antigravity_quota
     ;;
-  Stop)
+  Stop | StopFailure)
     telemetry idle
     [[ $harness == codex ]] && codex_quota
     [[ $harness == antigravity ]] && antigravity_quota
@@ -355,6 +377,14 @@ case $event in
     # outside this hook; the normal locks, working state and draft guards apply.
     if [[ -f $nest/state/pending-wake.json ]]; then
       (python3 "$SHARE/hive_messages.py" drain "$m" >/dev/null 2>&1) </dev/null &
+    fi
+    ;;
+  Notification)
+    if [[ $(field .notification_type) == idle_prompt ]]; then
+      telemetry idle
+      if [[ -f $nest/state/pending-wake.json ]]; then
+        (python3 "$SHARE/hive_messages.py" drain "$m" >/dev/null 2>&1) </dev/null &
+      fi
     fi
     ;;
   ToolUse)

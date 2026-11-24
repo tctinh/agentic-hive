@@ -213,7 +213,20 @@ in
               hooks = [ { type = "command"; command = hookCmd "PostToolUse"; } ];
             }
           ];
+          PostToolUseFailure = [
+            {
+              matcher = "*";
+              hooks = [ { type = "command"; command = hookCmd "PostToolUseFailure"; } ];
+            }
+          ];
           Stop = hook "Stop";
+          StopFailure = hook "StopFailure";
+          Notification = [
+            {
+              matcher = "idle_prompt";
+              hooks = [ { type = "command"; command = hookCmd "Notification"; } ];
+            }
+          ];
           SessionEnd = hook "SessionEnd";
         };
       };

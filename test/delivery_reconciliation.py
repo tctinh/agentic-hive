@@ -274,6 +274,57 @@ class DeliveryReconciliation(unittest.TestCase):
         self.assertEqual((self.terminal.pastes,self.terminal.enters),(1,1))
         self.assertFalse((self.state/'journal-prompt-receipt.json').exists())
 
+    def test_claude_pasted_content_wrapper_acknowledges_via_hook(self):
+        atomic(self.telemetry, {"session_id": "claude-sid-1", "status": "idle", "harness": "claude"})
+        record = self.retained(session="claude-sid-1")
+        wrapped = f'\n\n<pasted_content id="a0a0">\n{self.text}\n\n</pasted_content id="a0a0">\n'
+        env = dict(os.environ, HIVE_ROOT=str(self.root), HIVE_MEMBER="bob", HIVE_SHARE=str(SOURCE / "share"), HIVE_QUIET_MINUTES="0")
+        subprocess.run([str(SOURCE / "bin/hive-hook"), "claude", "UserPromptSubmit"], env=env,
+            input=json.dumps({"session_id": "claude-sid-1", "cwd": str(self.root), "prompt": wrapped}),
+            capture_output=True, text=True, check=True)
+        receipt = load(self.state / "last-submitted-prompt.json")
+        self.assertEqual(receipt["receipt"].split()[1], record["hash"])
+        self.assertTrue(prompt.current_receipt_acknowledges(record, self.state, "claude-sid-1"))
+        self.assertTrue(prompt.proof_acknowledges(record, load(self.state / "journal-prompt-receipt.json"), "claude-sid-1"))
+        report = prompt.reconcile_delivery(self.root, "bob")
+        self.assertEqual(report["status"], "submission-proven")
+        self.assertEqual(load(self.state / "prompt-delivery.json")["stage"], "acknowledged")
+
+    def test_claude_native_transcript_reconciles_stuck_pasted_journal(self):
+        atomic(self.telemetry, {"session_id": "claude-sid-2", "status": "idle", "harness": "claude"})
+        record = self.retained(session="claude-sid-2")
+        record["stage"] = "accepted"
+        atomic(self.state / "prompt-delivery.json", record)
+        claude_home = self.root / "claude-home"
+        transcript = claude_home / "projects/-srv-hive-projects/claude-sid-2.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        wrapped = f'\n\n<pasted_content id="99b2">\n{self.text}\n\n</pasted_content id="99b2">\n'
+        transcript.write_text(json.dumps({
+            "type": "user",
+            "sessionId": "claude-sid-2",
+            "timestamp": "2026-11-24T01:35:25.928Z",
+            "message": {"role": "user", "content": wrapped},
+        }) + "\n")
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(claude_home)):
+            report = prompt.reconcile_delivery(self.root, "bob")
+        self.assertTrue(report["submission_proven"])
+        self.assertEqual(report["status"], "submission-proven")
+        self.assertEqual(load(self.state / "prompt-delivery.json")["stage"], "acknowledged")
+
+    def test_claude_hook_status_lifecycle(self):
+        env = dict(os.environ, HIVE_ROOT=str(self.root), HIVE_MEMBER="bob", HIVE_SHARE=str(SOURCE / "share"), HIVE_QUIET_MINUTES="0")
+        def fire(event, payload):
+            subprocess.run([str(SOURCE / "bin/hive-hook"), "claude", event], env=env,
+                input=json.dumps(payload), capture_output=True, text=True, check=True)
+            return load(self.telemetry)
+        self.assertEqual(fire("SessionStart", {"session_id": "s1", "cwd": str(self.root), "source": "startup"})["status"], "idle")
+        self.assertEqual(fire("SessionStart", {"session_id": "s1", "cwd": str(self.root), "source": "resume"})["status"], "idle")
+        self.assertEqual(fire("SessionStart", {"session_id": "s1", "cwd": str(self.root), "source": "compact"})["status"], "working")
+        self.assertEqual(fire("StopFailure", {"session_id": "s1", "cwd": str(self.root)})["status"], "idle")
+        self.assertEqual(fire("PostToolUseFailure", {"session_id": "s1", "cwd": str(self.root), "tool_name": "Bash"})["status"], "working")
+        self.assertEqual(fire("Notification", {"session_id": "s1", "cwd": str(self.root), "notification_type": "permission_prompt"})["status"], "working")
+        self.assertEqual(fire("Notification", {"session_id": "s1", "cwd": str(self.root), "notification_type": "idle_prompt"})["status"], "idle")
+
 
 if __name__ == "__main__":
     unittest.main()

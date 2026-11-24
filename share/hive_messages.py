@@ -1097,7 +1097,7 @@ def journal_handed_off(path, telemetry):
 
 def journal_submission_proven(path, telemetry):
     """Let the guarded sender reconcile a confirmed, mismatched old journal."""
-    from hive_prompt import native_receipt, proof_acknowledges, current_receipt_acknowledges
+    from hive_prompt import harness_native_receipt, proof_acknowledges, current_receipt_acknowledges
     journal = load(path / "prompt-delivery.json")
     session = telemetry.get("session_id")
     if not session or not journal or journal.get("session_id") != session:
@@ -1105,10 +1105,7 @@ def journal_submission_proven(path, telemetry):
     if (current_receipt_acknowledges(journal, path, session)
         or proof_acknowledges(journal, load(path / "journal-prompt-receipt.json"), session)):
         return True
-    if telemetry.get("harness") != "codex":
-        return False
-    proof = native_receipt(journal, load(path / "quota-cache.json"),
-        os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    proof = harness_native_receipt(journal, path, telemetry)
     return proof_acknowledges(journal, proof, session)
 
 

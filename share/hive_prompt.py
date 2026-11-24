@@ -18,8 +18,21 @@ import uuid
 from hive_runtime import atomic, load
 
 
+PASTED_WRAPPER = re.compile(
+    r'^\s*<pasted_content id="([A-Za-z0-9_-]+)">\n([\s\S]*?)\n</pasted_content(?: id="\1")?>\s*$'
+)
+
+
+def unwrap_pasted(text):
+    """Unwrap Claude Code's bracketed-paste <pasted_content id=...> envelope."""
+    if not isinstance(text, str):
+        return text
+    match = PASTED_WRAPPER.fullmatch(text)
+    return match[2] if match else text
+
+
 def prompt_hash(text):
-    return hashlib.sha256(text.strip().encode()).hexdigest()
+    return hashlib.sha256(unwrap_pasted(text).strip().encode()).hexdigest()
 
 
 def receipt_acknowledges(record, current, session_id):
@@ -76,6 +89,7 @@ def record_receipt(root, member, payload):
     session = payload.get("session_id")
     if not record or not isinstance(text, str):
         return False
+    text = unwrap_pasted(text)
     ids = re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", text, re.M)
     marker = f"{time.time_ns()} {prompt_hash(text)}"
     if ids != record.get("ids") or not receipt_acknowledges(record, marker, session):
@@ -157,6 +171,109 @@ def native_receipt(record, cache, codex_home):
                         continue
     except (OSError, ValueError, TypeError, AttributeError):
         pass
+    return None
+
+
+def claude_native_receipt(record, claude_home):
+    """Recover a receipt from an exact persisted Claude Code user turn.
+
+    Searches only <claude_home>/projects/*/<session_id>.jsonl and requires an
+    exact hash (after unwrapping Claude's <pasted_content> envelope), IDs,
+    session identity, and timestamp newer than the journal baseline.
+    """
+    if not isinstance(record, dict):
+        return None
+    sid = record.get("session_id")
+    ids = record.get("ids")
+    if (not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid)
+        or not isinstance(ids, list)
+        or (not ids and not record.get("created_ns"))):
+        return None
+    try:
+        projects = (Path(claude_home) / "projects").resolve(strict=True)
+    except OSError:
+        return None
+    candidates = []
+    try:
+        for directory in sorted(projects.iterdir()):
+            if not directory.is_dir():
+                continue
+            candidate = directory / f"{sid}.jsonl"
+            if candidate.is_file():
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    if resolved.is_relative_to(projects):
+                        candidates.append(resolved)
+                except OSError:
+                    continue
+            if len(candidates) >= 8:
+                break
+    except OSError:
+        return None
+    for path in candidates:
+        try:
+            with path.open("rb") as stream:
+                with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                    end = len(data)
+                    start = max(0, end - 64 * 1024 * 1024)
+                    for _ in range(80 if ids else 20000):
+                        offset = data.rfind(ids[0].encode(), start, end) if ids else data.rfind(b"\n", start, max(start, end - 1)) + 1
+                        if offset < 0:
+                            break
+                        if not ids and (offset < start or end <= start):
+                            break
+                        first = data.rfind(b"\n", start, offset) + 1
+                        last = data.find(b"\n", offset)
+                        if last < 0:
+                            last = len(data)
+                        end = first
+                        if first < start or last - first > 2 * 1024 * 1024:
+                            continue
+                        try:
+                            row = json.loads(data[first:last])
+                            if row.get("type") != "user":
+                                continue
+                            row_sid = row.get("sessionId")
+                            if row_sid and row_sid != sid:
+                                continue
+                            content = (row.get("message") or {}).get("content")
+                            texts = []
+                            if isinstance(content, str):
+                                texts.append(content)
+                            elif isinstance(content, list):
+                                texts.extend(part.get("text") for part in content
+                                             if isinstance(part, dict) and isinstance(part.get("text"), str))
+                            stamp_raw = row.get("timestamp")
+                            if not isinstance(stamp_raw, str):
+                                continue
+                            stamp = datetime.fromisoformat(stamp_raw)
+                            if stamp.tzinfo is None:
+                                continue
+                            for raw_text in texts:
+                                text = unwrap_pasted(raw_text)
+                                if prompt_hash(text) != record.get("hash"):
+                                    continue
+                                if re.findall(r"^\[hive-message id=([A-Za-z0-9._:-]+)\]", text, re.M) != ids:
+                                    continue
+                                marker = f"{int(stamp.timestamp() * 10**9)} {record['hash']}"
+                                if receipt_acknowledges(record, marker, sid):
+                                    return {"binding": receipt_binding(record), "receipt": marker,
+                                        "event": "NativeUserMessage", "path": str(path)}
+                        except (ValueError, TypeError, KeyError, AttributeError):
+                            continue
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return None
+
+
+def harness_native_receipt(record, path, telemetry):
+    harness = telemetry.get("harness") if isinstance(telemetry, dict) else None
+    if harness == "codex":
+        return native_receipt(record, load(path / "quota-cache.json"),
+            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    if harness == "claude":
+        return claude_native_receipt(record,
+            os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
     return None
 
 
@@ -276,9 +393,8 @@ def delivery_status(root, member):
     stable = isinstance(session, str) and bool(session.strip()) and record.get("session_id") == session
     confirmed = bool(record and stable and (current_receipt_acknowledges(record, path, session)
         or proof_acknowledges(record, load(path / "journal-prompt-receipt.json"), session)))
-    if record and stable and not confirmed and telemetry.get("harness") == "codex":
-        proof = native_receipt(record, load(path / "quota-cache.json"),
-            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    if record and stable and not confirmed:
+        proof = harness_native_receipt(record, path, telemetry)
         confirmed = proof_acknowledges(record, proof, session)
     received = load(path / "delivery.json").get("request_receipts", [])
     pending = load(path / "pending-wake.json")
@@ -578,12 +694,11 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
         # A resumed harness can accept the exact user turn while its lifecycle
         # hook is missing. Corroborate during this attempt instead of requiring
         # a later retry/reconciliation. Composer resets alone still prove none.
-        if (telemetry.get("harness") == "codex" and active == previous.get("session_id")
+        if (telemetry.get("harness") in ("codex", "claude") and active == previous.get("session_id")
             and previous.get("stage") in ("submitted", "accepted")
             and time.monotonic() - last_native_check >= 1):
             last_native_check = time.monotonic()
-            proof = native_receipt(previous, load(path / "quota-cache.json"),
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+            proof = harness_native_receipt(previous, path, telemetry)
             if proof_acknowledges(previous, proof, active):
                 atomic(path / "journal-prompt-receipt.json", proof)
                 return True
@@ -599,10 +714,8 @@ def send(root, member, message, *, run=subprocess.run, require_idle=False):
     # sender was not running to retire its journal. Check it before rejecting
     # a different incoming batch; no terminal input is licensed by this check.
     if (previous and previous.get("stage") != "acknowledged"
-        and previous.get("session_id") == identity and not acknowledged()
-        and telemetry.get("harness") == "codex"):
-        proof = native_receipt(previous, load(path / "quota-cache.json"),
-            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        and previous.get("session_id") == identity and not acknowledged()):
+        proof = harness_native_receipt(previous, path, telemetry)
         if proof:
             atomic(path / "journal-prompt-receipt.json", proof)
     if previous and previous.get("stage") != "acknowledged" and acknowledged():

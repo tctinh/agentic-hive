@@ -14,8 +14,17 @@
     "PostToolUse": [
       { "matcher": "*", "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude PostToolUse" } ] }
     ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude PostToolUseFailure" } ] }
+    ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude Stop" } ] }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude StopFailure" } ] }
+    ],
+    "Notification": [
+      { "matcher": "idle_prompt", "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude Notification" } ] }
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "/usr/bin/hive-hook claude SessionEnd" } ] }

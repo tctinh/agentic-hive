@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
+os.environ["HIVE_SHARE"] = str(Path(__file__).resolve().parents[1] / "share")
 source = Path(__file__).resolve().parents[1] / "bin/hive-web"
 loader = importlib.machinery.SourceFileLoader("hive_web_test", str(source))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -848,6 +849,44 @@ while True:
             client_socket.close()
             if bridge.proc:
                 bridge.proc.wait(timeout=2)
+
+    def test_quota_refresh_and_antigravity_state(self):
+        self.assertEqual(self.request("/api/quota/refresh", {}, origin="https://evil.example")[0], 403)
+        bin_dir = self.root / "fake-agy-bin"
+        bin_dir.mkdir()
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text(
+            """#!/usr/bin/env bash
+cat <<'EOF'
+{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+  {"name":"Gemini Models","buckets":[
+    {"id":"gemini-weekly","window":"weekly","remaining_fraction":0.95,"reset_time":"2026-12-01T01:00:00Z"},
+    {"id":"gemini-5h","window":"5h","remaining_fraction":0.82,"reset_time":"2026-11-24T06:00:00Z"}
+  ]},
+  {"name":"Claude and GPT models","buckets":[
+    {"id":"3p-weekly","window":"weekly","remaining_fraction":0.60,"reset_time":"2026-12-01T01:00:00Z"},
+    {"id":"3p-5h","window":"5h","remaining_fraction":0.15,"reset_time":"2026-11-24T06:00:00Z"}
+  ]}
+]}}}
+EOF
+"""
+        )
+        fake_agy.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+            status, body = self.request("/api/quota/refresh", {})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["quota"]), 1)
+        agy_quota = body["quota"][0]
+        self.assertEqual(agy_quota["harness"], "antigravity")
+        self.assertEqual([w["name"] for w in agy_quota["windows"]], ["gemini 5h", "gemini week"])
+        self.assertEqual([w["used_percent"] for w in agy_quota["windows"]], [18.0, 5.0])
+        self.assertEqual([w["remaining_percent"] for w in agy_quota["windows"]], [82.0, 95.0])
+        self.assertEqual(agy_quota["windows"][0]["group"], "Gemini Models")
+
+        state_status, snapshot = self.get_json("/api/state")
+        self.assertEqual(state_status, 200)
+        self.assertEqual([q["harness"] for q in snapshot["quota"]], ["antigravity"])
 
 
 if __name__ == "__main__":

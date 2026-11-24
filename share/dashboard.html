@@ -251,13 +251,20 @@
   .team-filter { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
   .team-filter select { min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--panel); color: var(--ink); font: inherit; }
   .team-tag { color: var(--accent); background: var(--chip); border: 0; border-radius: 4px; padding: 3px 6px; font: 12px var(--mono); cursor: pointer; max-width: 100%; text-align: left; overflow-wrap: anywhere; }
-  .quota-stat { grid-column: span 2; }
-  .quota-lines { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 7px 12px; margin-top: 4px; }
+  .quota-stat { grid-column: 1 / -1; }
+  .quota-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .quota-actions { display: flex; align-items: center; gap: 8px; }
+  .quota-refresh { font: inherit; font-size: 11px; cursor: pointer; padding: 2px 8px; border: 1px solid var(--line);
+    border-radius: 5px; background: var(--chip); color: var(--ink); }
+  .quota-refresh:hover { border-color: var(--accent); }
+  .quota-refresh:disabled { opacity: .5; cursor: wait; }
+  .quota-lines { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; margin-top: 6px; }
   .quota-window { min-width: 0; font-size: 12px; }
-  .quota-window .label { display: flex; justify-content: space-between; gap: 4px; white-space: nowrap; }
+  .quota-window .label { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
   .quota-window .label span:first-child { overflow: hidden; text-overflow: ellipsis; }
   .quota-window small { color: var(--muted); font-size: 11px; }
   .quota-window .bar { margin-top: 3px; }
+  .quota-window .bar i.high { background: var(--dead); }
   @media (max-width: 640px) { .host { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .devlog-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
@@ -317,7 +324,10 @@
     <div class="stat"><div class="k">Memory</div><div class="v" id="mem">–</div><div class="bar"><i id="mem-bar"></i></div></div>
     <div class="stat"><div class="k">Disk (hive)</div><div class="v" id="disk">–</div><div class="bar"><i id="disk-bar"></i></div></div>
     <div class="stat"><div class="k">Load</div><div class="v" id="load">–</div><div class="bar"><i id="load-bar"></i></div></div>
-    <div class="stat quota-stat"><div class="k">Quota</div><div class="quota-lines" id="quota"></div></div>
+    <div class="stat quota-stat">
+      <div class="quota-head"><div class="k">Quota</div><div class="quota-actions"><span class="feedback" id="quota-feedback" role="status"></span><button type="button" class="quota-refresh" id="quota-refresh" onclick="refreshQuota()" title="Refresh Antigravity quota">Refresh</button></div></div>
+      <div class="quota-lines" id="quota"></div>
+    </div>
   </div>
 
   <nav class="tabs" aria-label="Dashboard views">
@@ -991,6 +1001,54 @@ function renderRoom(entries, members) {
   }
 }
 
+function renderQuota(qs) {
+  const until = iso => {
+    if (!iso) return "";
+    const s = (new Date(iso).getTime() - Date.now()) / 1000;
+    if (s <= 0) return "reset due";
+    if (s < 3600) return "resets in " + Math.round(s / 60) + "m";
+    if (s < 172800) return "resets in " + (s / 3600).toFixed(1) + "h";
+    return "resets in " + Math.round(s / 86400) + "d";
+  };
+  qs = qs || [];
+  $("quota").innerHTML = qs.length ? qs.map(q => q.windows.length ? q.windows.map(w => {
+    const used = w.used_percent == null ? null : Math.round(w.used_percent);
+    const width = Math.max(0, Math.min(100, Number(w.used_percent) || 0));
+    const left = w.remaining_percent == null ? null : Math.round(w.remaining_percent);
+    const sub = [until(w.resets_at), left == null ? "" : `${left}% left`].filter(Boolean).join(" · ");
+    const tip = [q.harness, w.group || "", used == null ? "" : `${used}% used${left == null ? "" : ` (${left}% left)`}`, `Updated ${ago(q.updated_at)}${q.reported_by ? " by " + q.reported_by : ""}`].filter(Boolean).join(" · ");
+    return `
+    <div class="quota-window" title="${esc(tip)}">
+      <div class="label"><span><b>${esc(q.harness)}</b> · ${esc(w.name)}</span><span>${used == null ? "–" : used + "%"}</span></div>
+      <div class="bar"><i${width >= 85 ? ' class="high"' : ""} style="width:${width}%"></i></div>
+      <small>${esc(sub)}</small>
+    </div>`;
+  }).join("") : `<div class="quota-window"><b>${esc(q.harness)}</b> · awaiting data</div>`).join("")
+    : `<span class="empty">No quota reported yet.</span>`;
+}
+
+async function refreshQuota() {
+  const button = $("quota-refresh");
+  const feedback = $("quota-feedback");
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  feedback.classList.remove("error");
+  feedback.textContent = "Checking…";
+  try {
+    const res = await fetch("/api/quota/refresh", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (dashboardData) dashboardData.quota = data.quota;
+    renderQuota(data.quota);
+    feedback.textContent = "Updated";
+  } catch (err) {
+    feedback.classList.add("error");
+    feedback.textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function render(d) {
   dashboardData = d;
   $('identity-button').textContent=d.viewer?.named ? `Beekeeper: ${d.viewer.name} · Change` : 'Set your name';
@@ -1007,23 +1065,7 @@ function render(d) {
   $("load").textContent = h.load.map(x => x.toFixed(2)).join(" "); bar("load-bar", 100 * h.load[0] / h.cpus);
 
   renderMembers(d.members);
-
-  const until = iso => {
-    if (!iso) return "";
-    const s = (new Date(iso).getTime() - Date.now()) / 1000;
-    if (s <= 0) return "reset due";
-    if (s < 3600) return "resets in " + Math.round(s / 60) + "m";
-    if (s < 172800) return "resets in " + (s / 3600).toFixed(1) + "h";
-    return "resets in " + Math.round(s / 86400) + "d";
-  };
-  const qs = d.quota || [];
-  $("quota").innerHTML = qs.length ? qs.map(q => q.windows.length ? q.windows.map(w => `
-    <div class="quota-window" title="${esc(q.harness)} · Updated ${ago(q.updated_at)}${q.reported_by ? " by " + esc(q.reported_by) : ""}">
-      <div class="label"><span><b>${esc(q.harness)}</b> · ${esc(w.name)}</span><span>${w.used_percent == null ? "–" : Math.round(w.used_percent) + "%"}</span></div>
-      <div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(w.used_percent) || 0))}%"></i></div>
-      <small>${until(w.resets_at)}</small>
-    </div>`).join("") : `<div class="quota-window"><b>${esc(q.harness)}</b> · awaiting data</div>`).join("")
-    : `<span class="empty">No quota reported yet.</span>`;
+  renderQuota(d.quota);
 
   $("c-count").textContent = d.claims.length ? "· " + d.claims.length : "";
   $("claims").innerHTML = d.claims.length ? `<table>${d.claims.map(c => `

@@ -34,6 +34,8 @@ if [[ -n $limits && $limits != null ]]; then
          windows: [
            ($rl.five_hour | select(.) | {name: "5h", used_percent: .used_percentage, resets_at: .resets_at}),
            ($rl.seven_day | select(.) | {name: "week", used_percent: .used_percentage, resets_at: .resets_at}),
+           ($rl.seven_day_sonnet | select(.) | {name: "sonnet week", used_percent: .used_percentage, resets_at: .resets_at}),
+           ($rl.seven_day_opus | select(.) | {name: "opus week", used_percent: .used_percentage, resets_at: .resets_at}),
            ($rl.spend_limit | select(.) | {name: "spend", used_percent: .used_percentage, resets_at: .resets_at})
          ]}' >"$tmp" 2>/dev/null && chmod 0664 "$tmp" && mv -f "$tmp" "$qf" || rm -f "${tmp:-}"
   fi

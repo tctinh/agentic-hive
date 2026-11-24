@@ -260,6 +260,22 @@ codex_quota() {
   timeout 0.3s python3 "$SHARE/hive_runtime.py" quota "$HIVE_ROOT" "$m" <<<"$input" 2>/dev/null || true
 }
 
+# Antigravity reports Gemini (normal) and Claude/GPT quota via `agy -p /usage`.
+# Throttle on a shared stamp and refresh asynchronously with stdio detached so
+# hooks return immediately.
+antigravity_quota() {
+  local qdir="$HIVE_ROOT/telemetry/quota" attempt="$HIVE_ROOT/telemetry/quota/.antigravity-attempt"
+  mkdir -p "$qdir" 2>/dev/null || return 0
+  exec 6>>"$qdir/.antigravity-attempt.lock" || return 0
+  flock -n 6 || { exec 6>&-; return 0; }
+  if (($(date +%s) - $(stat -c %Y "$attempt" 2>/dev/null || echo 0) < 60)); then
+    flock -u 6; exec 6>&-; return 0
+  fi
+  touch "$attempt" 2>/dev/null || true
+  flock -u 6; exec 6>&-
+  (python3 "$SHARE/hive_runtime.py" antigravity-quota "$HIVE_ROOT" "$m" </dev/null >/dev/null 2>&1) &
+}
+
 # Epoch of this member's most recent Room entry, or nothing.
 last_own_post() {
   tac "$HIVE_ROOT/ROOM.md" 2>/dev/null | gawk -v tail=" member=$m -->" '
@@ -305,10 +321,12 @@ case $event in
     if ((agy_launch)); then
       # The pane is ready for input; nothing can be injected until a prompt.
       telemetry idle
+      antigravity_quota
       return 0
     fi
     telemetry working
     deliver "$(session_header)"
+    [[ $harness == antigravity ]] && antigravity_quota
     ;;
   UserPromptSubmit)
     record_prompt
@@ -327,10 +345,12 @@ case $event in
     telemetry working
     deliver "$(profile_hint)"
     [[ $harness == codex ]] && codex_quota
+    [[ $harness == antigravity ]] && antigravity_quota
     ;;
   Stop)
     telemetry idle
     [[ $harness == codex ]] && codex_quota
+    [[ $harness == antigravity ]] && antigravity_quota
     # A request can arrive after the final tool checkpoint. Attempt one drain
     # outside this hook; the normal locks, working state and draft guards apply.
     if [[ -f $nest/state/pending-wake.json ]]; then

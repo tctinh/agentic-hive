@@ -13,7 +13,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "share"))
 from hive_config import update
-from hive_runtime import atomic, settings, arguments, quota, freshness
+from hive_runtime import (
+    antigravity_quota,
+    arguments,
+    atomic,
+    freshness,
+    parse_antigravity_usage,
+    quota,
+    settings,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -153,6 +161,111 @@ class RuntimeTests(unittest.TestCase):
                 json.loads((root / "telemetry/quota/codex.json").read_text())["windows"][0]["used_percent"],
                 12,
             )
+
+    def test_parse_antigravity_usage_both_gemini_and_claude_models(self):
+        payload = {
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.94,
+                                    "reset_time": "2026-12-01T01:08:16Z",
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.80,
+                                    "reset_time": "2026-11-24T06:08:16Z",
+                                },
+                            ],
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.59,
+                                    "reset_time": "2026-12-01T01:18:34Z",
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.17,
+                                    "reset_time": "2026-11-24T06:18:34Z",
+                                },
+                            ],
+                        },
+                    ]
+                },
+            },
+        }
+        windows, raw = parse_antigravity_usage(payload)
+        self.assertIsNotNone(raw)
+        self.assertEqual([w["name"] for w in windows], ["gemini 5h", "gemini week"])
+        self.assertEqual([w["used_percent"] for w in windows], [20.0, 6.0])
+        self.assertEqual([w["remaining_percent"] for w in windows], [80.0, 94.0])
+        self.assertEqual(windows[0]["group"], "Gemini Models")
+
+        tsv_windows, _ = parse_antigravity_usage(
+            {
+                "response": (
+                    "Gemini Models\tWeekly Limit Remaining\t93%\t2026-12-01T01:08:16Z\n"
+                    "Gemini Models\tFive Hour Limit Remaining\t80%\t2026-11-24T06:08:16Z\n"
+                    "Claude and GPT models\tWeekly Limit Remaining\t59%\t2026-12-01T01:18:34Z\n"
+                    "Claude and GPT models\tFive Hour Limit Remaining\t17%\t2026-11-24T06:18:34Z\n"
+                )
+            }
+        )
+        self.assertEqual([w["name"] for w in tsv_windows], ["gemini 5h", "gemini week"])
+        self.assertEqual([w["used_percent"] for w in tsv_windows], [20.0, 7.0])
+
+    def test_antigravity_quota_records_throttles_and_clears_member_env(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = root / "calls"
+            fake_agy = root / "agy"
+            fake_agy.write_text(
+                f"""#!/usr/bin/env bash
+printf '%s|%s|%s\\n' "$*" "${{HIVE_MEMBER:-}}" "${{HIVE_AGY_SESSION:-}}" >>"{calls}"
+cat <<'EOF'
+{{"status":"SUCCESS","command":{{"name":"usage","data":{{"groups":[
+  {{"name":"Gemini Models","buckets":[
+    {{"id":"gemini-5h","window":"5h","remaining_fraction":0.75,"reset_time":"2026-11-24T06:00:00Z"}},
+    {{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.9,"reset_time":"2026-12-01T01:00:00Z"}}
+  ]}},
+  {{"name":"Claude and GPT models","buckets":[
+    {{"id":"3p-5h","window":"5h","remaining_fraction":0.25,"reset_time":"2026-11-24T06:00:00Z"}},
+    {{"id":"3p-weekly","window":"weekly","remaining_fraction":0.6,"reset_time":"2026-12-01T01:00:00Z"}}
+  ]}}
+]}}}}}}
+EOF
+"""
+            )
+            fake_agy.chmod(0o755)
+            with patch.dict(os.environ, {"HIVE_MEMBER": "ant", "HIVE_AGY_SESSION": "agy_123"}):
+                first = antigravity_quota(root, "ant", agy_bin=str(fake_agy), now=1000, min_interval=60)
+                second = antigravity_quota(root, "ant", agy_bin=str(fake_agy), now=1020, min_interval=60)
+                forced = antigravity_quota(root, "ant", agy_bin=str(fake_agy), now=1020, min_interval=0)
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+            self.assertIsNotNone(forced)
+            self.assertEqual(calls.read_text().splitlines(), ["-p /usage --output-format json||", "-p /usage --output-format json||"])
+            saved = json.loads((root / "telemetry/quota/antigravity.json").read_text())
+            self.assertEqual(saved["harness"], "antigravity")
+            self.assertEqual([w["name"] for w in saved["windows"]], ["gemini 5h", "gemini week"])
+            self.assertEqual([w["used_percent"] for w in saved["windows"]], [25.0, 10.0])
 
     def test_working_guard_survives_gaps_and_missing_stop(self):
         with tempfile.TemporaryDirectory() as temp:

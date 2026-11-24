@@ -136,6 +136,37 @@ class AntigravityHook(unittest.TestCase):
     def test_outside_member_session(self):
         self.assertEqual(self.hook("Stop", {}, member=""), {})
 
+    def test_quota_refresh_runs_in_background_without_blocking_hook(self):
+        import time
+
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir()
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text(
+            """#!/usr/bin/env bash
+sleep 0.6
+cat <<'EOF'
+{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+  {"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.85,"reset_time":"2026-11-24T06:00:00Z"}]},
+  {"name":"Claude and GPT models","buckets":[{"id":"3p-5h","window":"5h","remaining_fraction":0.30,"reset_time":"2026-11-24T06:00:00Z"}]}
+]}}}
+EOF
+"""
+        )
+        fake_agy.chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}:{self.env['PATH']}"
+        started = time.monotonic()
+        self.assertEqual(self.hook("Stop", {"conversationId": "c-1", "cwd": self.tmp.name}), {})
+        self.assertLess(time.monotonic() - started, 0.5)
+        quota_file = self.root / "telemetry/quota/antigravity.json"
+        deadline = time.monotonic() + 3.0
+        while not quota_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(quota_file.is_file())
+        saved = json.loads(quota_file.read_text())
+        self.assertEqual([w["name"] for w in saved["windows"]], ["gemini 5h"])
+        self.assertEqual([w["used_percent"] for w in saved["windows"]], [15.0])
+
 
 if __name__ == "__main__":
     unittest.main()

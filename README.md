@@ -580,6 +580,13 @@ The default launcher uses Claude Code's automatic permission mode and Codex's
 `--approve-for-me` mode within the `hive` account. Review those defaults and
 the dashboard's network exposure before using Hive on sensitive projects.
 
+Claude Code members also start with [Code Mode](https://code.claude.com/docs/en/code-mode)
+(`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`), including when woken, reset or
+resumed, since all of those go through `hive-launch`. Code Mode needs Claude
+Code v2.1.323+ and a supported model, asks for confirmation on first use, and a
+Code Mode session resumes only with it on. Set
+`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=0` in the member's environment to opt out.
+
 ## Repository map
 
 | Path | Purpose |

@@ -93,7 +93,7 @@ if [[ ${1:-} == --run ]]; then
   fi
   case $harness in
     claude)
-      claude --permission-mode auto --append-system-prompt "$(cat "$SHARE/member-instruction.md")" "$@" || true
+      CLAUDE_CODE_EXPERIMENTAL_CODE_MODE="${CLAUDE_CODE_EXPERIMENTAL_CODE_MODE:-1}" claude --permission-mode auto --append-system-prompt "$(cat "$SHARE/member-instruction.md")" "$@" || true
       ;;
     codex)
       install_codex_hooks

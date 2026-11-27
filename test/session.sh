@@ -233,6 +233,7 @@ printf 'concurrent prompts independently submitted\n'
 cat >"$tmp/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf 'claude %s\n' "$*" >>"$HIVE_TEST_LOG"
+printf 'code-mode %s\n' "${CLAUDE_CODE_EXPERIMENTAL_CODE_MODE:-unset}" >>"$HIVE_TEST_LOG"
 EOF
 cat >"$tmp/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -244,6 +245,10 @@ HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run claude 'first task' </dev/
 HIVE_SHARE="$repo/share" "$repo/bin/hive-launch" --run codex 'first task' </dev/null >/dev/null
 rg -q '^claude --permission-mode auto .*first task$' "$HIVE_TEST_LOG"
 rg -q '^codex --approve-for-me --add-dir '"$HIVE_ROOT"' .*first task$' "$HIVE_TEST_LOG"
+rg -qx 'code-mode 1' "$HIVE_TEST_LOG"
+: >"$HIVE_TEST_LOG"
+CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=0 HIVE_SHARE="$tmp/share" "$repo/bin/hive-launch" --run claude 'again' </dev/null >/dev/null
+rg -qx 'code-mode 0' "$HIVE_TEST_LOG"
 printf 'autonomous launch flags applied\n'
 
 mkdir -p "$HIVE_ROOT/members/bob/notes" "$HIVE_ROOT/claims/demo"
